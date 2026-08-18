@@ -252,6 +252,13 @@ overflow that demonstrates generated errors crossing the WebAssembly boundary.
 Use `just wasm-demo 9000` to choose another port. `just wasm-demo-build` builds
 and tests the same package without starting a server.
 
+Serve the demo through `just wasm-demo` instead of opening `index.html`
+directly: browsers load WebAssembly modules through HTTP and require the
+generated binary to use the `application/wasm` content type. Demo source is in
+`demo/wasm/`; generated package files stay under the gitignored `output/`
+directory and can always be regenerated. `just wasm-sdk-fixture` runs the same
+package and demo behavior checks used by CI.
+
 Include the generated wrapper after the proc-macro expansion in the crate
 that owns the generated definitions:
 
