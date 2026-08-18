@@ -20,6 +20,12 @@
             pkgs.clippy
             pkgs.rustfmt
             pkgs.lld
+            pkgs.clang
+            pkgs.python3
+            pkgs.nodejs_22
+            pkgs.typescript
+            pkgs.kotlin
+            pkgs.jdk
             pkgs.just
             pkgs.wasm-pack
           ];

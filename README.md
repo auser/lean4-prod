@@ -219,10 +219,13 @@ Run the generated-language fixture checks with:
 just sdk-fixtures
 ```
 
-The fixture compiles the C header and Rust SDK, parses the Python SDK, and
-type-checks TypeScript and Kotlin when those toolchains are installed. It also
-builds a representative wasm-bindgen package and verifies its `.wasm`, `.js`,
-and `.d.ts` outputs.
+The fixture executes every generated SDK. C, Rust, and Python call the same
+compiled generated native library; TypeScript and Kotlin execute their adapter
+contracts against deterministic native-interface fakes; WebAssembly loads the
+generated `.wasm` through its JavaScript glue in Node. Every fixture checks
+success values, booleans, and generated error propagation. The Nix development
+shell declares all required compilers and runtimes, so CI runs the complete
+matrix rather than silently skipping a language.
 
 The WebAssembly SDK is emitted as a consumable wasm-bindgen package under
 `output/<stem>/wasm/`. It contains a `.wasm` binary, JavaScript glue, and

@@ -53,6 +53,7 @@ wasm-sdk-fixture:
     test -f output/fixture/wasm/fixture.js
     test -f output/fixture/wasm/fixture.d.ts
     test ! -e output/fixture/wasm/lib.rs
+    node rust/prod-codegen/tests/fixtures/wasm_sdk_test.mjs output/fixture/wasm
 
 # Compile/syntax-check one representative generated fixture for every SDK
 # language. Optional language compilers are skipped by the fixture harness.
