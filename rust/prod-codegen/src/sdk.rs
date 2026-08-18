@@ -356,7 +356,7 @@ fn generate_kotlin(specs: &[FunctionSpec], library: &str) -> String {
     for spec in specs {
         let ret = if spec.shape == Shape::Fallible {
             format!(
-                "Result<{}, Int>",
+                "Result<{}>",
                 if is_bool(spec.ret) { "Boolean" } else { "Long" }
             )
         } else {

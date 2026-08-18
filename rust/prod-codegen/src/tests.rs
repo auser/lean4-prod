@@ -113,6 +113,8 @@ fn test_generate_multi_language_sdk_bundle_from_one_abi() {
         .wasm
         .contains("#[wasm_bindgen(js_name = \"prod_demo_add\")]"));
     assert!(sdk.wasm.contains("fn __prod_compute_error"));
+    assert!(sdk.kotlin.contains("Result<Long>"));
+    assert!(!sdk.kotlin.contains("Result<Long, Int>"));
 }
 
 #[test]
