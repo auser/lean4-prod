@@ -45,9 +45,18 @@ sdk-kotlin ir="rust/prod-core/goldens.ir" stem="lean4-prod" library_name="lean4_
 sdk-wasm ir="rust/prod-core/goldens.ir" stem="lean4-prod" library_name="lean4_prod":
     just sdk wasm {{ir}} {{stem}} {{library_name}}
 
+# Build a representative wasm-bindgen package and assert that the public
+# artifacts are package files, not the intermediate generated Rust source.
+wasm-sdk-fixture:
+    RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdk rust/prod-codegen/tests/fixtures/sdk_scalar.ir --language wasm --output output --stem fixture --library-name fixture
+    test -f output/fixture/wasm/fixture_bg.wasm
+    test -f output/fixture/wasm/fixture.js
+    test -f output/fixture/wasm/fixture.d.ts
+    test ! -e output/fixture/wasm/lib.rs
+
 # Compile/syntax-check one representative generated fixture for every SDK
 # language. Optional language compilers are skipped by the fixture harness.
-sdk-fixtures:
+sdk-fixtures: wasm-sdk-fixture
     RUSTC_WRAPPER= cargo test --manifest-path rust/Cargo.toml -p prod-codegen --test sdk_fixtures -- --nocapture
 
 # Export prod from lean

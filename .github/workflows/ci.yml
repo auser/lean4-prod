@@ -20,3 +20,5 @@ jobs:
         run: nix develop --command just lint
       - name: Check wasm32 portability
         run: nix develop --command just wasm-check
+      - name: Build generated WebAssembly SDK fixture
+        run: nix develop --command just wasm-sdk-fixture

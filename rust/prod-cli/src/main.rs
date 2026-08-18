@@ -10,6 +10,8 @@ mod roots;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "prod")]
@@ -202,6 +204,117 @@ fn collect_externs(expr: &prod_ir::Expr, out: &mut Vec<String>) {
     }
 }
 
+fn wasm_package_name(stem: &str) -> String {
+    let mut name = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while name.starts_with('-') {
+        name.remove(0);
+    }
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() {
+        name.push_str("lean4-prod-sdk");
+    }
+    if name.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        name.insert_str(0, "lean-");
+    }
+    name
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", destination.display()));
+    for entry in
+        fs::read_dir(source).unwrap_or_else(|e| panic!("Failed to read {}: {e}", source.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("Failed to inspect package artifact: {e}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("Failed to inspect {}: {e}", source_path.display()))
+            .is_dir()
+        {
+            copy_directory_contents(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to copy wasm-pack artifact {} to {}: {e}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
+}
+
+fn build_wasm_sdk(source: &str, output: &Path, stem: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_nanos();
+    let staging = std::env::temp_dir().join(format!("lean4-prod-wasm-sdk-{nonce}"));
+    let src_dir = staging.join("src");
+    fs::create_dir_all(&src_dir)
+        .unwrap_or_else(|e| panic!("Failed to create wasm SDK staging directory: {e}"));
+    let package_name = wasm_package_name(stem);
+    fs::write(
+        staging.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwasm-bindgen = \"0.2.122\"\n"
+        ),
+    )
+    .unwrap_or_else(|e| panic!("Failed to write wasm SDK manifest: {e}"));
+    fs::write(src_dir.join("lib.rs"), source)
+        .unwrap_or_else(|e| panic!("Failed to write wasm SDK source: {e}"));
+
+    let status = Command::new("wasm-pack")
+        .current_dir(&staging)
+        .args(["build", "--target", "web", "--release", "--out-dir", "pkg"])
+        .status()
+        .unwrap_or_else(|e| panic!("Failed to run wasm-pack (install wasm-pack first): {e}"));
+    if !status.success() {
+        panic!("wasm-pack failed with status {status}");
+    }
+
+    let package_dir = staging.join("pkg");
+    let mut has_wasm = false;
+    let mut has_javascript = false;
+    let mut has_typescript = false;
+    for entry in fs::read_dir(&package_dir)
+        .unwrap_or_else(|e| panic!("Failed to read wasm-pack output: {e}"))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("Failed to inspect wasm-pack output: {e}"));
+        let file_name = entry.file_name();
+        let file_name_text = file_name.to_string_lossy();
+        has_wasm |= file_name_text.ends_with(".wasm");
+        has_javascript |= file_name_text.ends_with(".js");
+        has_typescript |= file_name_text.ends_with(".d.ts");
+    }
+    if !(has_wasm && has_javascript && has_typescript) {
+        let _ = fs::remove_dir_all(staging);
+        panic!(
+            "wasm-pack did not produce the required .wasm, .js, and .d.ts artifacts in {}",
+            output.display()
+        );
+    }
+    if output.exists() {
+        fs::remove_dir_all(output)
+            .unwrap_or_else(|e| panic!("Failed to replace {}: {e}", output.display()));
+    }
+    copy_directory_contents(&package_dir, output);
+    let _ = fs::remove_dir_all(staging);
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -306,8 +419,7 @@ fn main() {
                 .unwrap_or_else(|e| panic!("Failed to write TypeScript SDK: {}", e));
             fs::write(kotlin_dir.join("Lean4Prod.kt"), bindings.kotlin)
                 .unwrap_or_else(|e| panic!("Failed to write Kotlin SDK: {}", e));
-            fs::write(wasm_dir.join("lib.rs"), bindings.wasm)
-                .unwrap_or_else(|e| panic!("Failed to write WebAssembly SDK: {}", e));
+            build_wasm_sdk(&bindings.wasm, &wasm_dir, &stem);
             println!("Generated SDK bundle: {}", root.display());
         }
         Commands::Sdk {
@@ -385,13 +497,8 @@ fn main() {
                 }
                 SdkLanguage::Wasm => {
                     let directory = root.join("wasm");
-                    fs::create_dir_all(&directory).unwrap_or_else(|e| {
-                        panic!("Failed to create {}: {}", directory.display(), e)
-                    });
-                    let path = directory.join("lib.rs");
-                    fs::write(&path, bindings.wasm)
-                        .unwrap_or_else(|e| panic!("Failed to write {}: {}", path.display(), e));
-                    println!("Generated WebAssembly SDK: {}", path.display());
+                    build_wasm_sdk(&bindings.wasm, &directory, &stem);
+                    println!("Generated WebAssembly SDK: {}", directory.display());
                 }
             }
         }
@@ -533,5 +640,17 @@ fn main() {
                 None => print!("{}", rendered),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sdk_tests {
+    use super::wasm_package_name;
+
+    #[test]
+    fn wasm_package_names_are_valid_and_stable() {
+        assert_eq!(wasm_package_name("lean4-prod"), "lean4-prod");
+        assert_eq!(wasm_package_name("42 / Demo SDK"), "lean-42---demo-sdk");
+        assert_eq!(wasm_package_name("---"), "lean4-prod-sdk");
     }
 }

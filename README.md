@@ -188,7 +188,7 @@ output/lean4-prod/
 ├── python/      # ctypes module
 ├── typescript/  # loader-neutral TypeScript binding
 ├── kotlin/      # JNA interface and helpers
-└── wasm/        # wasm-bindgen Rust SDK source
+└── wasm/        # wasm-bindgen package: .wasm, .js, and .d.ts
 ```
 
 Use another exported module with `just sdks path/to/kernel.ir kernel`.
@@ -221,16 +221,18 @@ just sdk-fixtures
 
 The fixture compiles the C header and Rust SDK, parses the Python SDK, and
 type-checks TypeScript and Kotlin when those toolchains are installed. It also
-checks the generated wasm-bindgen exports; build that source for wasm32 in a
-consumer crate with `wasm-bindgen` (or `wasm-pack`).
+builds a representative wasm-bindgen package and verifies its `.wasm`, `.js`,
+and `.d.ts` outputs.
 
-The WebAssembly SDK is a Rust source library at
-`output/<stem>/wasm/lib.rs`. Add it to a wasm32 crate with
-`wasm-bindgen = "0.2"`, then build that crate for
-`wasm32-unknown-unknown` and run `wasm-bindgen` to produce JavaScript and
-TypeScript glue. Its exported functions use the same scalar `Nat`/`Int`/`Bool`
-ABI as the other SDKs; fallible functions return a JavaScript error through
-`Result<_, JsValue>`.
+The WebAssembly SDK is emitted as a consumable wasm-bindgen package under
+`output/<stem>/wasm/`. It contains a `.wasm` binary, JavaScript glue, and
+TypeScript declarations; import the generated `.js` module and call its
+default initializer before using the named exports. The generated package
+uses the web target and does not require consumers to compile Rust or install
+`wasm-bindgen`. Its exported functions use the same scalar `Nat`/`Int`/`Bool`
+ABI as the other SDKs; fallible functions surface a JavaScript error.
+Generation itself requires `wasm-pack`; it is included in the repository's
+Nix development shell.
 
 Include the generated wrapper after the proc-macro expansion in the crate
 that owns the generated definitions:

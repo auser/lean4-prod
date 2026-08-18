@@ -21,6 +21,8 @@ pub struct SdkBindings {
     pub python: String,
     pub typescript: String,
     pub kotlin: String,
+    /// Generated wasm-bindgen Rust source. The CLI packages this source into
+    /// `.wasm`, `.js`, and `.d.ts` artifacts with `wasm-pack`.
     pub wasm: String,
 }
 
