@@ -26,3 +26,4 @@ lean_lib ProofFixtures where
 @[default_target]
 lean_exe «prod-export» where
   root := `Prod.Emit
+  supportInterpreter := true
