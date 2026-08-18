@@ -464,7 +464,13 @@ def lowerTypeDecl (typeName : Name) : LowerM (Option String) := do
     let some (.ctorInfo cv) := env.find? ctorName | return none
     -- Walk the constructor telescope past the (zero) type params to reach the
     -- value fields, pairing each with its declared name.
-    let fieldNames := getStructureFields env typeName
+    -- `getStructureFields` panics for ordinary inductives.  Constructor
+    -- binder names are stable only for structures; enums use deterministic
+    -- positional names instead.
+    let fieldNames :=
+      match getStructureInfo? env typeName with
+      | some info => info.fieldNames
+      | none => #[]
     let mut fields : Array String := #[]
     let mut ty := cv.type
     let mut i := 0

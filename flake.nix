@@ -27,6 +27,7 @@
             pkgs.kotlin
             pkgs.jdk
             pkgs.just
+            pkgs.ripgrep
             pkgs.wasm-pack
           ];
 

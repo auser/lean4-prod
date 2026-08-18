@@ -5,6 +5,8 @@
 
   (type "Conformance.MidProp" (ctor "Conformance.MidProp.mk" (first Nat) (second Nat) (third Nat)))
 
+  (type "Conformance.SmallEnum" (ctor "Conformance.SmallEnum.left") (ctor "Conformance.SmallEnum.right" (field_0 Nat)))
+
   (type "Conformance.NoProp" (ctor "Conformance.NoProp.mk" (alpha Nat) (beta Nat)))
 
   ;; full: Conformance.c_nat_shl
@@ -14,6 +16,10 @@
   ;; full: Conformance.c_guard_le
   (def c_guard_le ((a Nat) (b Nat)) Nat
     (if (le a b) (let _x_7 1 _x_7) (let _x_3 0 _x_3)))
+
+  ;; full: Conformance.c_enum_identity
+  (def c_enum_identity ((x (named "Conformance.SmallEnum"))) (named "Conformance.SmallEnum")
+    x)
 
   ;; full: Conformance.c_list_consume
   (def c_list_consume ((x_1 (List Nat))) Nat

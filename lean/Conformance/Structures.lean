@@ -6,6 +6,15 @@ import Prod.Attribute
 
 namespace Conformance
 
+/-- Ordinary inductives are not structures. Their export must not call
+    `getStructureFields`, which reports a Lean panic even though export can
+    otherwise continue and misleadingly exit successfully. -/
+inductive SmallEnum where
+  | left
+  | right (value : Nat)
+
+@[prod] def c_enum_identity (x : SmallEnum) : SmallEnum := x
+
 /-- Prop field in the MIDDLE, not at the end: the case the existing
     `UorAtlas.Instance` (whose proof field is last) does not exercise. -/
 structure MidProp where

@@ -71,6 +71,23 @@ wasm-demo port="8000": wasm-demo-build
 sdk-fixtures: wasm-sdk-fixture
     RUSTC_WRAPPER= cargo test --manifest-path rust/Cargo.toml -p prod-codegen --test sdk_fixtures -- --nocapture
 
+# Export executable scalar adapters over the pinned UOR Framework
+# formalization, package them as WebAssembly, and execute the result in Node.
+uor-fixture:
+    cd integrations/uor-framework && lake build UORProd
+    cd integrations/uor-framework && lake env lean --run UORProdExport.lean --out ../../output/uor
+    rg -q --fixed-strings -- "- EXPORTED-WITH-OPAQUE: 0" output/uor/coverage.md
+    RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdks output/uor/kernel.ir --output output --stem uor --library-name uor
+    test -f output/uor/c/uor.h
+    test -f output/uor/rust/lib.rs
+    test -f output/uor/python/uor.py
+    test -f output/uor/typescript/index.ts
+    test -f output/uor/kotlin/Lean4Prod.kt
+    test -f output/uor/wasm/uor_bg.wasm
+    test -f output/uor/wasm/uor.js
+    test -f output/uor/wasm/uor.d.ts
+    node integrations/uor-framework/wasm_test.mjs output/uor/wasm
+
 # Export prod from lean
 prod-export:
     cd lean && lake exe prod-export

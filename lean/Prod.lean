@@ -3,6 +3,7 @@ import Prod.Extract
 import Prod.Lower
 import Prod.Roots
 import Prod.Coverage
+import Prod.Export
 
 /-!
 # Prod — the Lean → sexp IR extractor

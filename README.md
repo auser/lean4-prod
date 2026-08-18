@@ -227,6 +227,36 @@ success values, booleans, and generated error propagation. The Nix development
 shell declares all required compilers and runtimes, so CI runs the complete
 matrix rather than silently skipping a language.
 
+### Pinned UOR Framework integration
+
+The repository includes an external-package fixture for the UOR Framework
+formalization requested as a production input. It pins upstream commit
+`51c01382200b0179d6640b07e9c8119364ab69a1`, imports `UOR.Enums`, exports real
+UOR computations through the reusable `Prod.exportModule` API, generates the
+complete language SDK bundle, and executes its WebAssembly package in Node:
+
+```sh
+nix develop path:. --command just uor-fixture
+```
+
+Artifacts are generated under `output/uor/`: `kernel.ir`, proof-root and
+coverage reports, C, Rust, Python, TypeScript, Kotlin, and WebAssembly SDKs.
+The wasm package contains `uor.js`, `uor.d.ts`, and `uor_bg.wasm`. The
+executable adapters currently expose
+`WittLevel.bitsWidth (WittLevel.new n)` and UOR's primitive-operation
+commutativity metadata. They deliberately use the scalar ABI shared by every
+generated SDK.
+
+This is an executable integration with the upstream formalization, not a
+claim that its entire generated data model is supported. UOR also contains
+polymorphic structures and arrays; those require explicit foreign-language
+ownership and layout contracts before they can be exported safely. The
+fixture therefore keeps that boundary visible instead of inventing an ABI.
+Its own `lean-toolchain` selects Lean 4.30 so the external declarations pass
+through the same compiler frontend as this generator; only the imported
+production modules are built, avoiding unrelated upstream test assertions
+pinned to UOR's older toolchain.
+
 The WebAssembly SDK is emitted as a consumable wasm-bindgen package under
 `output/<stem>/wasm/`. It contains a `.wasm` binary, JavaScript glue, and
 TypeScript declarations; import the generated `.js` module and call its

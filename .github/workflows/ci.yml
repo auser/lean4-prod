@@ -22,3 +22,5 @@ jobs:
         run: nix develop --command just wasm-check
       - name: Build generated WebAssembly SDK fixture
         run: nix develop --command just wasm-sdk-fixture
+      - name: Export and execute pinned UOR Framework fixture
+        run: nix develop --command just uor-fixture

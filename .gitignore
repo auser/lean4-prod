@@ -5,6 +5,7 @@ skills.lock
 **/*.rs.bk
 .result
 lean/.lake
+integrations/uor-framework/.lake/
 rust/target
 rust/prod-core/kernel.ir
 roots.json
