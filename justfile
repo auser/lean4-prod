@@ -54,9 +54,20 @@ wasm-sdk-fixture:
     test -f output/fixture/wasm/fixture.d.ts
     test ! -e output/fixture/wasm/lib.rs
     node rust/prod-codegen/tests/fixtures/wasm_sdk_test.mjs output/fixture/wasm
+    node demo/wasm/demo_test.mjs output/fixture/wasm
 
-# Compile/syntax-check one representative generated fixture for every SDK
-# language. Optional language compilers are skipped by the fixture harness.
+# Build the generated package consumed by the browser demo.
+wasm-demo-build:
+    RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdk rust/prod-codegen/tests/fixtures/sdk_scalar.ir --language wasm --output output --stem fixture --library-name fixture
+    node demo/wasm/demo_test.mjs output/fixture/wasm
+
+# Build and serve the browser demo from the repository root.
+wasm-demo port="8000": wasm-demo-build
+    @echo "Open http://127.0.0.1:{{port}}/demo/wasm/"
+    python3 -m http.server {{port}} --bind 127.0.0.1
+
+# Execute one representative generated fixture for every SDK language. The Nix
+# shell supplies every compiler/runtime; host runs skip tools not installed.
 sdk-fixtures: wasm-sdk-fixture
     RUSTC_WRAPPER= cargo test --manifest-path rust/Cargo.toml -p prod-codegen --test sdk_fixtures -- --nocapture
 

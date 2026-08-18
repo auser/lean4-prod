@@ -237,6 +237,21 @@ ABI as the other SDKs; fallible functions surface a JavaScript error.
 Generation itself requires `wasm-pack`; it is included in the repository's
 Nix development shell.
 
+### WebAssembly browser demo
+
+Build the fixture SDK and launch an interactive browser demo with:
+
+```sh
+nix develop path:. --command just wasm-demo
+```
+
+Then open <http://127.0.0.1:8000/demo/wasm/>. The page imports the generated
+JavaScript wrapper and `.wasm` binary from `output/fixture/wasm/`, then runs
+checked natural-number addition, a Lean comparison, and an intentional
+overflow that demonstrates generated errors crossing the WebAssembly boundary.
+Use `just wasm-demo 9000` to choose another port. `just wasm-demo-build` builds
+and tests the same package without starting a server.
+
 Include the generated wrapper after the proc-macro expansion in the crate
 that owns the generated definitions:
 

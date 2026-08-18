@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Run Lean 4 definitions as generated WebAssembly in the browser."
+    />
+    <title>lean4-prod WebAssembly demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Lean 4 → generated Rust → WebAssembly</p>
+        <h1>Kernel-checked logic, running in your browser.</h1>
+        <p class="intro">
+          These controls call the generated <code>.wasm</code> module directly.
+          There is no server-side compute and no handwritten implementation
+          between the Lean definitions and these results.
+        </p>
+        <div class="engine-status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="engine-status">Loading generated WebAssembly…</span>
+        </div>
+      </header>
+
+      <section class="demo-grid" aria-label="WebAssembly examples">
+        <article class="card">
+          <div class="card-heading">
+            <p class="step">01 / checked arithmetic</p>
+            <h2>Add natural numbers</h2>
+          </div>
+          <p>Lean naturals map to checked <code>u64</code> arithmetic.</p>
+          <form id="add-form">
+            <label>
+              First number
+              <input id="add-left" inputmode="numeric" value="40" required />
+            </label>
+            <span class="operator" aria-hidden="true">+</span>
+            <label>
+              Second number
+              <input id="add-right" inputmode="numeric" value="2" required />
+            </label>
+            <button type="submit">Run add</button>
+          </form>
+          <output id="add-result" class="result" for="add-left add-right">
+            Ready
+          </output>
+        </article>
+
+        <article class="card">
+          <div class="card-heading">
+            <p class="step">02 / decidable proposition</p>
+            <h2>Compare two values</h2>
+          </div>
+          <p>The generated boolean preserves Lean's <code>Nat.lt</code>.</p>
+          <form id="less-form">
+            <label>
+              Left value
+              <input id="less-left" inputmode="numeric" value="7" required />
+            </label>
+            <span class="operator" aria-hidden="true">&lt;</span>
+            <label>
+              Right value
+              <input id="less-right" inputmode="numeric" value="11" required />
+            </label>
+            <button type="submit">Run comparison</button>
+          </form>
+          <output id="less-result" class="result" for="less-left less-right">
+            Ready
+          </output>
+        </article>
+
+        <article class="card card-wide">
+          <div class="card-heading">
+            <p class="step">03 / explicit failure</p>
+            <h2>See overflow cross the wasm boundary</h2>
+          </div>
+          <p>
+            The generated function adds one before comparing. At the largest
+            supported natural, it returns a typed compute error that becomes a
+            JavaScript exception—never a panic or silent wrap.
+          </p>
+          <div class="overflow-row">
+            <code>riskyFlag(18,446,744,073,709,551,615)</code>
+            <button id="overflow-button" type="button">Trigger safely</button>
+          </div>
+          <output id="overflow-result" class="result">Ready</output>
+        </article>
+      </section>
+
+      <footer>
+        <p>Generated from <code>sdk_scalar.ir</code> by lean4-prod.</p>
+        <a href="../../README.md">Read the project guide</a>
+      </footer>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
