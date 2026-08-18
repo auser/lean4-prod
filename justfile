@@ -42,6 +42,9 @@ sdk-typescript ir="rust/prod-core/goldens.ir" stem="lean4-prod" library_name="le
 sdk-kotlin ir="rust/prod-core/goldens.ir" stem="lean4-prod" library_name="lean4_prod":
     just sdk kotlin {{ir}} {{stem}} {{library_name}}
 
+sdk-wasm ir="rust/prod-core/goldens.ir" stem="lean4-prod" library_name="lean4_prod":
+    just sdk wasm {{ir}} {{stem}} {{library_name}}
+
 # Compile/syntax-check one representative generated fixture for every SDK
 # language. Optional language compilers are skipped by the fixture harness.
 sdk-fixtures:
@@ -111,4 +114,4 @@ fmt:
 
 # Portable half must stay no_std/wasm32-clean.
 wasm-check:
-    cd rust && RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build -p prod-ir -p prod-codegen -p prod-wasm --target wasm32-unknown-unknown
+    cd rust && RUSTC_WRAPPER= RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build -p prod-ir -p prod-codegen -p prod-wasm --target wasm32-unknown-unknown

@@ -189,4 +189,9 @@ object Native {
     assert!(sdk.python.contains("import ctypes"));
     assert!(sdk.c_header.contains("#include <stdint.h>"));
     assert!(sdk.rust.contains("#[link(name = \"fixture\")]"));
+    assert!(sdk.wasm.contains("use wasm_bindgen::prelude::*"));
+    assert!(sdk
+        .wasm
+        .contains("#[wasm_bindgen(js_name = \"prod_fixture_add\")]"));
+    assert!(sdk.wasm.contains("Result<u64, JsValue>"));
 }

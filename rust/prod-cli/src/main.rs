@@ -45,7 +45,7 @@ enum Commands {
         #[arg(long)]
         rust_output: String,
     },
-    /// Generate C, Rust, Python, TypeScript, and Kotlin SDK artifacts.
+    /// Generate C, Rust, Python, TypeScript, Kotlin, and WebAssembly SDK artifacts.
     Sdks {
         /// Path to the exported IR file
         path: String,
@@ -103,6 +103,7 @@ enum SdkLanguage {
     Python,
     Typescript,
     Kotlin,
+    Wasm,
 }
 
 /// The Lean half of the subset contract, written by `prod-export`
@@ -278,7 +279,15 @@ fn main() {
             let python_dir = root.join("python");
             let typescript_dir = root.join("typescript");
             let kotlin_dir = root.join("kotlin");
-            for directory in [&c_dir, &rust_dir, &python_dir, &typescript_dir, &kotlin_dir] {
+            let wasm_dir = root.join("wasm");
+            for directory in [
+                &c_dir,
+                &rust_dir,
+                &python_dir,
+                &typescript_dir,
+                &kotlin_dir,
+                &wasm_dir,
+            ] {
                 fs::create_dir_all(directory)
                     .unwrap_or_else(|e| panic!("Failed to create {}: {}", directory.display(), e));
             }
@@ -297,6 +306,8 @@ fn main() {
                 .unwrap_or_else(|e| panic!("Failed to write TypeScript SDK: {}", e));
             fs::write(kotlin_dir.join("Lean4Prod.kt"), bindings.kotlin)
                 .unwrap_or_else(|e| panic!("Failed to write Kotlin SDK: {}", e));
+            fs::write(wasm_dir.join("lib.rs"), bindings.wasm)
+                .unwrap_or_else(|e| panic!("Failed to write WebAssembly SDK: {}", e));
             println!("Generated SDK bundle: {}", root.display());
         }
         Commands::Sdk {
@@ -371,6 +382,16 @@ fn main() {
                     fs::write(&path, bindings.kotlin)
                         .unwrap_or_else(|e| panic!("Failed to write {}: {}", path.display(), e));
                     println!("Generated Kotlin SDK: {}", path.display());
+                }
+                SdkLanguage::Wasm => {
+                    let directory = root.join("wasm");
+                    fs::create_dir_all(&directory).unwrap_or_else(|e| {
+                        panic!("Failed to create {}: {}", directory.display(), e)
+                    });
+                    let path = directory.join("lib.rs");
+                    fs::write(&path, bindings.wasm)
+                        .unwrap_or_else(|e| panic!("Failed to write {}: {}", path.display(), e));
+                    println!("Generated WebAssembly SDK: {}", path.display());
                 }
             }
         }

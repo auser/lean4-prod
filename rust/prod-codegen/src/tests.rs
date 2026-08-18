@@ -108,6 +108,11 @@ fn test_generate_multi_language_sdk_bundle_from_one_abi() {
     assert!(sdk.typescript.contains("prod_demo_less"));
     assert!(sdk.kotlin.contains("import com.sun.jna.Library"));
     assert!(sdk.kotlin.contains("interface Lean4ProdNative"));
+    assert!(sdk.wasm.contains("use wasm_bindgen::prelude::*"));
+    assert!(sdk
+        .wasm
+        .contains("#[wasm_bindgen(js_name = \"prod_demo_add\")]"));
+    assert!(sdk.wasm.contains("fn __prod_compute_error"));
 }
 
 #[test]

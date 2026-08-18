@@ -6,7 +6,7 @@
 //! calling convention and scalar conversions.
 
 use super::c_abi::{generate_c_bindings, is_bool, rust_abi_type, FunctionSpec};
-use super::{CAbiError, CBindings, Shape};
+use super::{last_component, rust_ident, CAbiError, CBindings, Shape};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -21,6 +21,7 @@ pub struct SdkBindings {
     pub python: String,
     pub typescript: String,
     pub kotlin: String,
+    pub wasm: String,
 }
 
 fn result_name(spec: &FunctionSpec) -> String {
@@ -403,9 +404,78 @@ fn generate_kotlin(specs: &[FunctionSpec], library: &str) -> String {
     out
 }
 
+fn wasm_error_helper() -> &'static str {
+    r#"fn __prod_compute_error(error: crate::ComputeError) -> JsValue {
+    JsValue::from_str(match error {
+        crate::ComputeError::AddOverflow => "addition overflow",
+        crate::ComputeError::MulOverflow => "multiplication overflow",
+        crate::ComputeError::ShiftOverflow => "shift overflow",
+        crate::ComputeError::PowOverflow => "power overflow",
+        crate::ComputeError::ShiftExponentTooLarge => "shift exponent too large",
+        crate::ComputeError::PowExponentTooLarge => "power exponent too large",
+        crate::ComputeError::OutputTooSmall => "output buffer too small",
+    })
+}
+
+"#
+}
+
+fn generate_wasm(module: &Module, specs: &[FunctionSpec]) -> Result<String, CAbiError> {
+    let body =
+        super::generate_module(module).map_err(|error| CAbiError::UnsupportedDefinition {
+            definition: module.name.clone(),
+            reason: format!("wasm codegen: {error}"),
+        })?;
+    let mut out = String::from(
+        "// Generated wasm-bindgen SDK for a Lean 4 library.\n#![allow(unsafe_code)]\n\nuse wasm_bindgen::prelude::*;\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum ComputeError {\n    AddOverflow,\n    MulOverflow,\n    ShiftOverflow,\n    PowOverflow,\n    ShiftExponentTooLarge,\n    PowExponentTooLarge,\n    OutputTooSmall,\n}\n\n",
+    );
+    out.push_str(wasm_error_helper());
+    out.push_str(&body);
+    for spec in specs {
+        let rust_name = rust_ident(last_component(&spec.definition));
+        let wrapper_name = format!("__wasm_{}", spec.c_name);
+        let params = spec
+            .params
+            .iter()
+            .map(|(name, scalar)| {
+                format!(
+                    "{}: {}",
+                    name,
+                    if is_bool(*scalar) {
+                        "bool"
+                    } else {
+                        rust_abi_type(*scalar)
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args = spec
+            .params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_type = rust_public_type(spec);
+        if spec.shape == Shape::Fallible {
+            out.push_str(&format!(
+                "#[wasm_bindgen(js_name = \"{}\")]\npub fn {}({}) -> Result<{}, JsValue> {{\n    {}({}).map_err(__prod_compute_error)\n}}\n\n",
+                spec.c_name, wrapper_name, params, return_type, rust_name, args
+            ));
+        } else {
+            out.push_str(&format!(
+                "#[wasm_bindgen(js_name = \"{}\")]\npub fn {}({}) -> {} {{\n    {}({})\n}}\n\n",
+                spec.c_name, wrapper_name, params, return_type, rust_name, args
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// Generate all supported language SDK artifacts over the common C ABI.
 pub fn generate_sdks(module: &Module, library: &str) -> Result<SdkBindings, CAbiError> {
     let c: CBindings = generate_c_bindings(module)?;
+    let wasm = generate_wasm(module, &c.functions)?;
     Ok(SdkBindings {
         c_header: c.header,
         c_wrapper: c.rust,
@@ -413,5 +483,6 @@ pub fn generate_sdks(module: &Module, library: &str) -> Result<SdkBindings, CAbi
         python: generate_python(&c.functions),
         typescript: generate_typescript(&c.functions),
         kotlin: generate_kotlin(&c.functions, library),
+        wasm,
     })
 }

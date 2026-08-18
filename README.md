@@ -187,7 +187,8 @@ output/lean4-prod/
 ├── rust/        # safe Rust wrapper crate source
 ├── python/      # ctypes module
 ├── typescript/  # loader-neutral TypeScript binding
-└── kotlin/      # JNA interface and helpers
+├── kotlin/      # JNA interface and helpers
+└── wasm/        # wasm-bindgen Rust SDK source
 ```
 
 Use another exported module with `just sdks path/to/kernel.ir kernel`.
@@ -204,6 +205,7 @@ just sdk-rust
 just sdk-python
 just sdk-typescript
 just sdk-kotlin
+just sdk-wasm
 ```
 
 These write only the selected language's files under `output/<stem>/`. The
@@ -218,7 +220,17 @@ just sdk-fixtures
 ```
 
 The fixture compiles the C header and Rust SDK, parses the Python SDK, and
-type-checks TypeScript and Kotlin when those toolchains are installed.
+type-checks TypeScript and Kotlin when those toolchains are installed. It also
+checks the generated wasm-bindgen exports; build that source for wasm32 in a
+consumer crate with `wasm-bindgen` (or `wasm-pack`).
+
+The WebAssembly SDK is a Rust source library at
+`output/<stem>/wasm/lib.rs`. Add it to a wasm32 crate with
+`wasm-bindgen = "0.2"`, then build that crate for
+`wasm32-unknown-unknown` and run `wasm-bindgen` to produce JavaScript and
+TypeScript glue. Its exported functions use the same scalar `Nat`/`Int`/`Bool`
+ABI as the other SDKs; fallible functions return a JavaScript error through
+`Result<_, JsValue>`.
 
 Include the generated wrapper after the proc-macro expansion in the crate
 that owns the generated definitions:
