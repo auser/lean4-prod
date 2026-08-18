@@ -19,6 +19,7 @@
             pkgs.rustc
             pkgs.clippy
             pkgs.rustfmt
+            pkgs.lld
             pkgs.just
             pkgs.wasm-pack
           ];
