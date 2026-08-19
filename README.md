@@ -242,9 +242,10 @@ nix develop path:. --command just uor-fixture
 Artifacts are generated under `output/uor/`: `kernel.ir`, proof-root and
 coverage reports, C, Rust, Python, TypeScript, Kotlin, and WebAssembly SDKs.
 The wasm package contains `uor.js`, `uor.d.ts`, and `uor_bg.wasm`. The
-executable adapters currently expose UOR Witt-level bit and byte widths plus
-primitive-operation commutativity metadata. They deliberately use the scalar
-ABI shared by every generated SDK.
+executable adapters currently expose
+`WittLevel.bitsWidth (WittLevel.new n)` and UOR's primitive-operation
+commutativity metadata. They deliberately use the scalar ABI shared by every
+generated SDK.
 
 This is an executable integration with the upstream formalization, not a
 claim that its entire generated data model is supported. UOR also contains
@@ -268,17 +269,16 @@ Nix development shell.
 
 ### WebAssembly browser demo
 
-Build the pinned UOR SDK and launch an interactive browser demo with:
+Build the fixture SDK and launch an interactive browser demo with:
 
 ```sh
 nix develop path:. --command just wasm-demo
 ```
 
 Then open <http://127.0.0.1:8000/demo/wasm/>. The page imports the generated
-JavaScript wrapper and `.wasm` binary from `output/uor/wasm/`, resolves standard
-UOR Witt-level bit and byte widths, and reads UOR primitive-operation metadata.
-The page also shows the pinned upstream commit and the six SDK targets produced
-from the same exported IR.
+JavaScript wrapper and `.wasm` binary from `output/fixture/wasm/`, then runs
+checked natural-number addition, a Lean comparison, and an intentional
+overflow that demonstrates generated errors crossing the WebAssembly boundary.
 Use `just wasm-demo 9000` to choose another port. `just wasm-demo-build` builds
 and tests the same package without starting a server.
 
@@ -286,9 +286,8 @@ Serve the demo through `just wasm-demo` instead of opening `index.html`
 directly: browsers load WebAssembly modules through HTTP and require the
 generated binary to use the `application/wasm` content type. Demo source is in
 `demo/wasm/`; generated package files stay under the gitignored `output/`
-directory and can always be regenerated. `just uor-fixture` runs the same
-package and demo behavior checks used by CI; `just wasm-sdk-fixture` remains
-the generic scalar WebAssembly regression.
+directory and can always be regenerated. `just wasm-sdk-fixture` runs the same
+package and demo behavior checks used by CI.
 
 Include the generated wrapper after the proc-macro expansion in the crate
 that owns the generated definitions:

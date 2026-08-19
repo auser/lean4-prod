@@ -7,19 +7,18 @@
       name="description"
       content="Run Lean 4 definitions as generated WebAssembly in the browser."
     />
-    <title>UOR Framework WebAssembly demo</title>
+    <title>lean4-prod WebAssembly demo</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main>
       <header class="hero">
-        <p class="eyebrow">UOR Framework → Lean 4 → Rust → WebAssembly</p>
-        <h1>The UOR formalization, running in your browser.</h1>
+        <p class="eyebrow">Lean 4 → generated Rust → WebAssembly</p>
+        <h1>Kernel-checked logic, running in your browser.</h1>
         <p class="intro">
-          These controls call definitions imported from the pinned UOR
-          Framework formalization through a generated <code>.wasm</code> module.
-          There is no server-side compute or handwritten JavaScript
-          implementation of the results.
+          These controls call the generated <code>.wasm</code> module directly.
+          There is no server-side compute and no handwritten implementation
+          between the Lean definitions and these results.
         </p>
         <div class="engine-status" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span>
@@ -30,68 +29,70 @@
       <section class="demo-grid" aria-label="WebAssembly examples">
         <article class="card">
           <div class="card-heading">
-            <p class="step">01 / Witt level</p>
-            <h2>Resolve a ring width</h2>
+            <p class="step">01 / checked arithmetic</p>
+            <h2>Add natural numbers</h2>
           </div>
-          <p>
-            Run UOR's <code>WittLevel.new</code> and
-            <code>WittLevel.bitsWidth</code>, then derive its byte width in
-            generated code.
-          </p>
-          <form id="witt-form" class="single-field">
+          <p>Lean naturals map to checked <code>u64</code> arithmetic.</p>
+          <form id="add-form">
             <label>
-              Standard Witt level
-              <select id="witt-level">
-                <option value="8">W8</option>
-                <option value="32">W32</option>
-                <option value="64" selected>W64</option>
-                <option value="256">W256</option>
-                <option value="4096">W4096</option>
-              </select>
+              First number
+              <input id="add-left" inputmode="numeric" value="40" required />
             </label>
-            <button type="submit">Run generated UOR code</button>
+            <span class="operator" aria-hidden="true">+</span>
+            <label>
+              Second number
+              <input id="add-right" inputmode="numeric" value="2" required />
+            </label>
+            <button type="submit">Run add</button>
           </form>
-          <output id="witt-result" class="result" for="witt-level">
+          <output id="add-result" class="result" for="add-left add-right">
             Ready
           </output>
         </article>
 
         <article class="card">
           <div class="card-heading">
-            <p class="step">02 / controlled vocabulary</p>
-            <h2>Inspect operation metadata</h2>
+            <p class="step">02 / decidable proposition</p>
+            <h2>Compare two values</h2>
           </div>
-          <p>
-            Query the boolean metadata attached by UOR to
-            <code>PrimitiveOp.add</code>. The displayed value comes from Lean,
-            through generated Rust and WebAssembly.
-          </p>
-          <button id="metadata-button" type="button">Read UOR metadata</button>
-          <output id="metadata-result" class="result">
+          <p>The generated boolean preserves Lean's <code>Nat.lt</code>.</p>
+          <form id="less-form">
+            <label>
+              Left value
+              <input id="less-left" inputmode="numeric" value="7" required />
+            </label>
+            <span class="operator" aria-hidden="true">&lt;</span>
+            <label>
+              Right value
+              <input id="less-right" inputmode="numeric" value="11" required />
+            </label>
+            <button type="submit">Run comparison</button>
+          </form>
+          <output id="less-result" class="result" for="less-left less-right">
             Ready
           </output>
         </article>
 
         <article class="card card-wide">
           <div class="card-heading">
-            <p class="step">03 / reproducible pipeline</p>
-            <h2>One formal source, six SDK targets</h2>
+            <p class="step">03 / explicit failure</p>
+            <h2>See overflow cross the wasm boundary</h2>
           </div>
           <p>
-            The fixture pins UOR Framework commit
-            <code>51c01382200b0179d6640b07e9c8119364ab69a1</code>. The same
-            exported IR produces C, Rust, Python, TypeScript, Kotlin, and this
-            WebAssembly package under <code>output/uor/</code>.
+            The generated function adds one before comparing. At the largest
+            supported natural, it returns a typed compute error that becomes a
+            JavaScript exception—never a panic or silent wrap.
           </p>
-          <div class="artifact-row">
-            <code>UOR.Enums → UORProd → UOR.Framework IR → uor_bg.wasm</code>
-            <span class="pipeline-badge">0 opaque exports</span>
+          <div class="overflow-row">
+            <code>riskyFlag(18,446,744,073,709,551,615)</code>
+            <button id="overflow-button" type="button">Trigger safely</button>
           </div>
+          <output id="overflow-result" class="result">Ready</output>
         </article>
       </section>
 
       <footer>
-        <p>Generated from the pinned <code>UOR.Enums</code> module by lean4-prod.</p>
+        <p>Generated from <code>sdk_scalar.ir</code> by lean4-prod.</p>
         <a href="../../README.md">Read the project guide</a>
       </footer>
     </main>

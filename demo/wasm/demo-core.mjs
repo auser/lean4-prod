@@ -12,16 +12,22 @@ export function parseNat(value, label) {
   return parsed;
 }
 
-export function wittBits(sdk, level) {
-  return sdk.prod_uor_framework_wittbits(parseNat(level, "Witt level"));
+export function add(sdk, left, right) {
+  return sdk.prod_fixture_add(
+    parseNat(left, "First number"),
+    parseNat(right, "Second number"),
+  );
 }
 
-export function wittBytes(sdk, level) {
-  return sdk.prod_uor_framework_wittbytes(parseNat(level, "Witt level"));
+export function less(sdk, left, right) {
+  return sdk.prod_fixture_less(
+    parseNat(left, "Left value"),
+    parseNat(right, "Right value"),
+  );
 }
 
-export function addIsCommutative(sdk) {
-  return sdk.prod_uor_framework_addiscommutative();
+export function triggerOverflow(sdk) {
+  return sdk.prod_fixture_riskyflag(MAX_NAT);
 }
 
 export function errorMessage(error) {
