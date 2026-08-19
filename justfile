@@ -54,12 +54,10 @@ wasm-sdk-fixture:
     test -f output/fixture/wasm/fixture.d.ts
     test ! -e output/fixture/wasm/lib.rs
     node rust/prod-codegen/tests/fixtures/wasm_sdk_test.mjs output/fixture/wasm
-    node demo/wasm/demo_test.mjs output/fixture/wasm
 
-# Build the generated package consumed by the browser demo.
-wasm-demo-build:
-    RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdk rust/prod-codegen/tests/fixtures/sdk_scalar.ir --language wasm --output output --stem fixture --library-name fixture
-    node demo/wasm/demo_test.mjs output/fixture/wasm
+# Build the pinned UOR package consumed by the browser demo.
+wasm-demo-build: uor-wasm
+    node demo/wasm/demo_test.mjs output/uor/wasm
 
 # Build and serve the browser demo from the repository root.
 wasm-demo port="8000": wasm-demo-build
@@ -71,12 +69,18 @@ wasm-demo port="8000": wasm-demo-build
 sdk-fixtures: wasm-sdk-fixture
     RUSTC_WRAPPER= cargo test --manifest-path rust/Cargo.toml -p prod-codegen --test sdk_fixtures -- --nocapture
 
-# Export executable scalar adapters over the pinned UOR Framework
-# formalization, package them as WebAssembly, and execute the result in Node.
-uor-fixture:
+# Export executable scalar adapters over the pinned UOR Framework formalization.
+uor-export:
     cd integrations/uor-framework && lake build UORProd
     cd integrations/uor-framework && lake env lean --run UORProdExport.lean --out ../../output/uor
     rg -q --fixed-strings -- "- EXPORTED-WITH-OPAQUE: 0" output/uor/coverage.md
+
+# Generate only the UOR WebAssembly package used by the browser demo.
+uor-wasm: uor-export
+    RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdk output/uor/kernel.ir --language wasm --output output --stem uor --library-name uor
+
+# Generate every UOR SDK and execute both the package and browser-demo contracts.
+uor-fixture: uor-export
     RUSTC_WRAPPER= cargo run --manifest-path rust/Cargo.toml -p prod-cli -- sdks output/uor/kernel.ir --output output --stem uor --library-name uor
     test -f output/uor/c/uor.h
     test -f output/uor/rust/lib.rs
@@ -87,6 +91,7 @@ uor-fixture:
     test -f output/uor/wasm/uor.js
     test -f output/uor/wasm/uor.d.ts
     node integrations/uor-framework/wasm_test.mjs output/uor/wasm
+    node demo/wasm/demo_test.mjs output/uor/wasm
 
 # Export prod from lean
 prod-export:

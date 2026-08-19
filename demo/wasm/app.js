@@ -1,9 +1,14 @@
-import init, * as sdk from "../../output/fixture/wasm/fixture.js";
-import { add, errorMessage, less, triggerOverflow } from "./demo-core.mjs";
+import init, * as sdk from "../../output/uor/wasm/uor.js";
+import {
+  addIsCommutative,
+  errorMessage,
+  wittBits,
+  wittBytes,
+} from "./demo-core.mjs";
 
 const engineStatus = document.querySelector(".engine-status");
 const statusText = document.querySelector("#engine-status");
-const controls = document.querySelectorAll("button, input");
+const controls = document.querySelectorAll("button, input, select");
 
 function setControlsDisabled(disabled) {
   for (const control of controls) control.disabled = disabled;
@@ -36,31 +41,20 @@ try {
   statusText.textContent = `WebAssembly failed to load: ${errorMessage(error)}`;
 }
 
-document.querySelector("#add-form").addEventListener("submit", (event) => {
+document.querySelector("#witt-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  run(document.querySelector("#add-result"), () =>
-    add(
-      sdk,
-      document.querySelector("#add-left").value,
-      document.querySelector("#add-right").value,
-    ),
-  );
-});
-
-document.querySelector("#less-form").addEventListener("submit", (event) => {
-  event.preventDefault();
+  const level = document.querySelector("#witt-level").value;
   run(
-    document.querySelector("#less-result"),
-    () =>
-      less(
-        sdk,
-        document.querySelector("#less-left").value,
-        document.querySelector("#less-right").value,
-      ),
-    (value) => (value ? "True" : "False"),
+    document.querySelector("#witt-result"),
+    () => ({ bits: wittBits(sdk, level), bytes: wittBytes(sdk, level) }),
+    ({ bits, bytes }) => `W${bits} = ${bytes} bytes`,
   );
 });
 
-document.querySelector("#overflow-button").addEventListener("click", () => {
-  run(document.querySelector("#overflow-result"), () => triggerOverflow(sdk));
+document.querySelector("#metadata-button").addEventListener("click", () => {
+  run(
+    document.querySelector("#metadata-result"),
+    () => addIsCommutative(sdk),
+    (value) => `PrimitiveOp.add.isCommutative = ${value ? "true" : "false"}`,
+  );
 });

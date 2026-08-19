@@ -15,6 +15,9 @@ namespace UORProd
 @[prod] def wittBits (n : Nat) : Nat :=
   WittLevel.bitsWidth (WittLevel.new n)
 
+@[prod] def wittBytes (n : Nat) : Nat :=
+  WittLevel.bitsWidth (WittLevel.new n) / 8
+
 @[prod] def addIsCommutative : Bool :=
   PrimitiveOp.isCommutative .add
 

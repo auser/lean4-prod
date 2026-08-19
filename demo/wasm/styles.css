@@ -145,7 +145,8 @@ label {
   text-transform: uppercase;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid #33423a;
   border-radius: 10px;
@@ -157,7 +158,8 @@ input {
   padding: 13px 14px;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: #62e6a6;
   box-shadow: 0 0 0 3px rgba(98, 230, 166, 0.12);
 }
@@ -201,6 +203,10 @@ form button {
   margin-top: 8px;
 }
 
+form.single-field {
+  grid-template-columns: 1fr;
+}
+
 .result {
   display: flex;
   min-height: 58px;
@@ -221,7 +227,7 @@ form button {
   color: #ff8e84;
 }
 
-.overflow-row {
+.artifact-row {
   display: flex;
   gap: 18px;
   align-items: center;
@@ -230,6 +236,16 @@ form button {
   border: 1px solid #33423a;
   border-radius: 12px;
   background: #0c110f;
+}
+
+.pipeline-badge {
+  flex: 0 0 auto;
+  border: 1px solid rgba(98, 230, 166, 0.4);
+  border-radius: 999px;
+  color: #78edb2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  padding: 8px 12px;
 }
 
 footer {
@@ -267,7 +283,7 @@ footer a {
     display: none;
   }
 
-  .overflow-row,
+  .artifact-row,
   footer {
     align-items: stretch;
     flex-direction: column;

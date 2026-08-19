@@ -10,4 +10,6 @@ await sdk.default({ module_or_path: wasm });
 
 assert.equal(sdk.prod_uor_framework_wittbits(8n), 8n);
 assert.equal(sdk.prod_uor_framework_wittbits(4096n), 4096n);
+assert.equal(sdk.prod_uor_framework_wittbytes(8n), 1n);
+assert.equal(sdk.prod_uor_framework_wittbytes(4096n), 512n);
 assert.equal(sdk.prod_uor_framework_addiscommutative(), false);
