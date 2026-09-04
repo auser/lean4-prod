@@ -1,8 +1,8 @@
 spec = "lean4-prod/generated-lean-fixture/1"
 generator = "lexlean"
-generator_version = "0.1.1"
+generator_version = "0.2.0"
 language = "1.1"
-compiler_semantics_id = "6b613e860795cea66671c05f25703733da99c4679dbc73d74a1b52680066452c"
+compiler_semantics_id = "49561889f77c9c3571da51e8e53233da9df5ab8f46d16165159425ba2e82dc44"
 lean_toolchain = "leanprover/lean4:v4.32.1"
 
 [[pair]]
@@ -13,9 +13,9 @@ generated_sha256 = "ca1b7dacc4063fdc6c34b3b963080a8d4df7c7864b014a54d1433ac590c3
 
 [[pair]]
 source_path = "fixtures/prismpm-1.1/source/Foundation/Holo.lex.tex"
-source_sha256 = "d37e09e6e6b0ad71b253ed699f6ee6bd9f06c6bd9397e2119bba46525c0313df"
+source_sha256 = "a9a36cbe5bd3e5f3dad3ee20fcddc7c7a47674f5b5d07cf614b8bee8d1b06209"
 generated_path = "lean/PrismPM/Foundation/Holo.lean"
-generated_sha256 = "444795b6dc4223f41e01a49924ee29fe1b795a168bc2b9114d10c3f4597c2a33"
+generated_sha256 = "04e6eb30ecd5b3f299b07df7539b76da3e6a1fbd6f6bdaa880e194d5d4baa659"
 
 [[pair]]
 source_path = "fixtures/prismpm-1.1/source/Foundation/Qual.lex.tex"
@@ -28,3 +28,129 @@ source_path = "fixtures/prismpm-1.1/source/Foundation/Sec.lex.tex"
 source_sha256 = "5ccc7b59871c45343db28f6c44d612a2d694667bf560e2d508616d0a8c7ceb73"
 generated_path = "lean/PrismPM/Foundation/Sec.lean"
 generated_sha256 = "9f0137c834ea0c68de871167b36682e6132b46c44acdcd6e3c8692eb5d8ec1c8"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Application.lex.tex"
+source_sha256 = "f1b4566a2a11378097bd2d2bce5bbfda54cd29e4971729bc24718f5e3260bda9"
+generated_path = "lean/PrismPM/Foundation/Application.lean"
+generated_sha256 = "978e50627153a4576e38f3406268c61d34321505fb17e7945c4c48b0340b24cc"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Bytes.lex.tex"
+source_sha256 = "2adbefe025d3253113099677e1fdf27aed2044be2f581b26e84a61be59f40fa0"
+generated_path = "lean/PrismPM/Foundation/Bytes.lean"
+generated_sha256 = "a40b8112781b4f0d1eaf3433253cbe56bac399a826bb4070dd256ecfac5538da"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Codec.lex.tex"
+source_sha256 = "55157171003629927e15f1f2ad4ee549e539ccc74ca7535943c0414783f58662"
+generated_path = "lean/PrismPM/Foundation/Codec.lean"
+generated_sha256 = "12baecf491670547d83d9ffc8133ee4e390674f22f973a1ebf3ef06c3578a886"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Core.lex.tex"
+source_sha256 = "9ad239fdf3e540cdeddd7bf57e9af9c75fef556eeae59679e3c1cf462c7071df"
+generated_path = "lean/PrismPM/Foundation/Core.lean"
+generated_sha256 = "9ec8424193cc90766caf4c8674e03096033b7832e4e167dd7c0200b6b1350924"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Archive.lex.tex"
+source_sha256 = "141ff8d834845499548284d6fcbe4ad40415b1c531e67ebd34ce904ea789d468"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Archive.lean"
+generated_sha256 = "5d021c0f7f8c82f5500ce281f04088e7e55f81c01b373a54a51054716bcf89e9"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Capability.lex.tex"
+source_sha256 = "4c63298053d830ae40460c7f73fe525978947b71a7e24904beefe7affb13b1fa"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Capability.lean"
+generated_sha256 = "5873e1a6863addd6d2e4e99237c444a077deb56e56782d430303821f830975ad"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/CoreWasm.lex.tex"
+source_sha256 = "044e6c854f8411305a1b6c0c73a6616c2c1daec21f7760f4a581faa9fb150ddb"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/CoreWasm.lean"
+generated_sha256 = "d2e459d6f58361547a563fb815f912f0d022cdea7a4cac59529e284a24bce230"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Directory.lex.tex"
+source_sha256 = "e7a2ac00b7a4f49f120e504b04479aa9cc35605a2f614e5ec520afaff71d28a6"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Directory.lean"
+generated_sha256 = "2427b73667e04d7edb0d88a0149fc6d37713be6905ed37d5ef5cfbaee06ef9b5"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Format.lex.tex"
+source_sha256 = "c5f16828cdcb0a3f15e66163f00731548bd2fdc96046278b7439ce8ff3cdb391"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Format.lean"
+generated_sha256 = "103c43b4b021cf95e2ef4f73cea333b91508457a880be80921d3557ee9c65d57"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Identity.lex.tex"
+source_sha256 = "0db2568dc03795c51acced2421b69e063f8271437775da5e33dc14866bc8d183"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Identity.lean"
+generated_sha256 = "e4cdf8a846da288c97efe354b2b874225e648ea0dd35ed75c7c3ece616126615"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/Manifest.lex.tex"
+source_sha256 = "a8b5ea096286b6cb7a6ccb3d8591e704d49b1d4cfd9d19e1b672c6b2b2824d99"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/Manifest.lean"
+generated_sha256 = "6dcaf5d68142383910620e3cac00f1aa4c426ebe3e8e11f520ed9cbdfe8f07cf"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/PrismExtension.lex.tex"
+source_sha256 = "0ed44e388de55a2d917b9aa0f46561781ccb2f40f388fe038decfcfff7561440"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/PrismExtension.lean"
+generated_sha256 = "c68f1fd4ec9c1fdb70fd5ded3c0348ab203332c16b73015c15d60af33b5c57bf"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/SourceManifest.lex.tex"
+source_sha256 = "15869beba6c87ba667dd2054f46e0b9a770587a4ee92ec4f3b554863f55a296d"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/SourceManifest.lean"
+generated_sha256 = "4b23a906df8adfdad5dd96e03d56c06515c60d87c24d1c8d9654c8494e710894"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Holo/V1/View.lex.tex"
+source_sha256 = "7ecff3ca9de55edad0c28af197eb898cc899a479b755132f555576b9d9719659"
+generated_path = "lean/PrismPM/Foundation/Holo/V1/View.lean"
+generated_sha256 = "39bcf95a368d4f80bf44ab703055c57efbe7a7e15bfbb9a73333753a624ec329"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Integer.lex.tex"
+source_sha256 = "04708fb14598750fd30b438eb70b8c861251c0b348de569d6a396aab45343af3"
+generated_path = "lean/PrismPM/Foundation/Integer.lean"
+generated_sha256 = "6c16218c2881015aad0b5601de942f304d57bc0578ea3c193e9a3c0dbad779a1"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Result.lex.tex"
+source_sha256 = "91f7e2c04968efd74b4379a3286ccdf860cee1604cf9419430f59e80b9f3d242"
+generated_path = "lean/PrismPM/Foundation/Result.lean"
+generated_sha256 = "3e7c5ca4f568fc61d50e94fa82d3ee78bebdea2560d53416bcc0617e751938d8"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Runtime.lex.tex"
+source_sha256 = "c0c326de71a30ae2df995c9e1f75bc9e7c56fe22f43fdc4859e7092402187b0a"
+generated_path = "lean/PrismPM/Foundation/Runtime.lean"
+generated_sha256 = "7d29fedc1aaa5ab180a020a52a6f4c88bc3454023d7b05e6a6d076dfbf24484e"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/Utf8.lex.tex"
+source_sha256 = "da95b0dc154f6fdc0a87e7af9ec87b149627726d6e88888399f22af00a1cefdf"
+generated_path = "lean/PrismPM/Foundation/Utf8.lean"
+generated_sha256 = "795c8cea83297d3b73b4a4390c49b40fc744b38a67ac195f36c8a954ac89bac8"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/View/V1/Interaction.lex.tex"
+source_sha256 = "d454e74fc178563013259a917943f84d0d2b19d1883e143d03b1ae58b01cfbc0"
+generated_path = "lean/PrismPM/Foundation/View/V1/Interaction.lean"
+generated_sha256 = "3bbd4801ade4af6bcd0b6f72702e95b6544623798fb4208f49f3c9df32f5a531"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/View/V1/Model.lex.tex"
+source_sha256 = "3370dff0810fa496a35b2a131cd5d0f62d45b6cd1fc1e8561681637caad8fbbe"
+generated_path = "lean/PrismPM/Foundation/View/V1/Model.lean"
+generated_sha256 = "bc8ef3498f31932c48613634c613f03cf45dcd4b47e07ad801ff76349c7fbdc0"
+
+[[pair]]
+source_path = "fixtures/prismpm-1.1/source/Foundation/View/V1/Projection.lex.tex"
+source_sha256 = "075c5b6362f5bb6aa7a7085ae2a0ff3a0cb4aea2d1b3458093ed9c788dc7e971"
+generated_path = "lean/PrismPM/Foundation/View/V1/Projection.lean"
+generated_sha256 = "b992ca986b33502fc70ad81f5af7df68c8e0dda75b797d3545f0a8178994ab66"

@@ -28,12 +28,29 @@ pub struct Definition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
     Nat,
+    /// Mathematical, unbounded Lean `Int`. Runtime code generation rejects
+    /// it unless a target explicitly supplies an exact representation.
     Int,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    String,
+    Bytes,
+    Ordering,
     Bool,
     /// A type declared in this module's `types` list, by full Lean name.
     /// Renders as a generated Rust struct or enum.
     Named(String),
     Option(Box<Type>),
+    Result {
+        ok: Box<Type>,
+        error: Box<Type>,
+    },
     Vec(Box<Type>),
     /// Lean `List α`. Allocation-free by policy, so the rendering depends on
     /// position: a parameter becomes a borrowed `&[α]` slice (matched with
@@ -60,12 +77,41 @@ pub struct Alt {
 pub enum Expr {
     Nat(u64),
     Int(i64),
+    String(String),
     Bool(bool),
     Var(String),
     Param(usize), // De Bruijn-style parameter index
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
+    /// Checked fixed-width operations return `Option`; unlike the older Nat
+    /// operators they are values, not `ComputeError` control flow.
+    CheckedAdd(Box<Expr>, Box<Expr>),
+    CheckedSub(Box<Expr>, Box<Expr>),
+    CheckedMul(Box<Expr>, Box<Expr>),
+    CheckedNeg(Box<Expr>),
+    CheckedDiv(Box<Expr>, Box<Expr>),
+    BitAnd(Box<Expr>, Box<Expr>),
+    BitOr(Box<Expr>, Box<Expr>),
+    BitXor(Box<Expr>, Box<Expr>),
+    BitNot(Box<Expr>),
+    CheckedShl(Box<Expr>, Box<Expr>),
+    CheckedShr(Box<Expr>, Box<Expr>),
+    CheckedConvert(Box<Expr>),
+    Append(Box<Expr>, Box<Expr>),
+    Length(Box<Expr>),
+    Index(Box<Expr>, Box<Expr>),
+    Slice(Box<Expr>, Box<Expr>, Box<Expr>),
+    Utf8Encode(Box<Expr>),
+    Utf8Decode(Box<Expr>),
+    CompareBytes(Box<Expr>, Box<Expr>),
+    SplitExact(Box<Expr>, Box<Expr>, Box<Expr>),
+    Join(Box<Expr>, Box<Expr>),
+    ParseDecimal(Box<Expr>),
+    FormatDecimal(Box<Expr>),
+    Quotient(Box<Expr>, Box<Expr>, Box<Expr>),
+    Remainder(Box<Expr>, Box<Expr>, Box<Expr>),
+    Negate(Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
     Mod(Box<Expr>, Box<Expr>),
     Shl(Box<Expr>, Box<Expr>),
@@ -139,6 +185,19 @@ impl Expr {
             Expr::Add(a, b)
             | Expr::Sub(a, b)
             | Expr::Mul(a, b)
+            | Expr::CheckedAdd(a, b)
+            | Expr::CheckedSub(a, b)
+            | Expr::CheckedMul(a, b)
+            | Expr::CheckedDiv(a, b)
+            | Expr::BitAnd(a, b)
+            | Expr::BitOr(a, b)
+            | Expr::BitXor(a, b)
+            | Expr::CheckedShl(a, b)
+            | Expr::CheckedShr(a, b)
+            | Expr::Append(a, b)
+            | Expr::Index(a, b)
+            | Expr::CompareBytes(a, b)
+            | Expr::Join(a, b)
             | Expr::Div(a, b)
             | Expr::Mod(a, b)
             | Expr::Shl(a, b)
@@ -151,7 +210,20 @@ impl Expr {
                 out.push(a);
                 out.push(b);
             }
-            Expr::If(c, t, f) => {
+            Expr::CheckedNeg(value)
+            | Expr::BitNot(value)
+            | Expr::CheckedConvert(value)
+            | Expr::Length(value)
+            | Expr::Utf8Encode(value)
+            | Expr::Utf8Decode(value)
+            | Expr::ParseDecimal(value)
+            | Expr::FormatDecimal(value) => out.push(value),
+            Expr::Negate(value) => out.push(value),
+            Expr::If(c, t, f)
+            | Expr::Slice(c, t, f)
+            | Expr::SplitExact(c, t, f)
+            | Expr::Quotient(c, t, f)
+            | Expr::Remainder(c, t, f) => {
                 out.push(c);
                 out.push(t);
                 out.push(f);
@@ -179,6 +251,7 @@ impl Expr {
             // Leaves: no subexpressions. Listed, not wildcarded — see above.
             Expr::Nat(_)
             | Expr::Int(_)
+            | Expr::String(_)
             | Expr::Bool(_)
             | Expr::Var(_)
             | Expr::Param(_)
@@ -238,32 +311,59 @@ mod tests {
     /// there; the assertions then force it into the `children()` table too.
     const ALL_VARIANTS: &[&str] = &[
         "Add",
+        "Append",
+        "BitAnd",
+        "BitNot",
+        "BitOr",
+        "BitXor",
         "Bool",
         "Call",
+        "CheckedAdd",
+        "CheckedConvert",
+        "CheckedDiv",
+        "CheckedMul",
+        "CheckedNeg",
+        "CheckedShl",
+        "CheckedShr",
+        "CheckedSub",
+        "CompareBytes",
         "Ctor",
         "Div",
         "Eq",
         "Extern",
+        "FormatDecimal",
         "Gt",
         "If",
+        "Index",
         "Int",
         "Jmp",
+        "Join",
         "Jp",
         "Le",
+        "Length",
         "Let",
         "Lt",
         "Match",
         "Mod",
         "Mul",
         "Nat",
+        "Negate",
         "Opaque",
         "Param",
+        "ParseDecimal",
         "Pow",
         "Proj",
+        "Quotient",
+        "Remainder",
         "Shl",
         "Shr",
+        "Slice",
+        "SplitExact",
+        "String",
         "Sub",
         "Unreachable",
+        "Utf8Decode",
+        "Utf8Encode",
         "Var",
     ];
 
@@ -271,12 +371,39 @@ mod tests {
         match e {
             Expr::Nat(_) => "Nat",
             Expr::Int(_) => "Int",
+            Expr::String(_) => "String",
             Expr::Bool(_) => "Bool",
             Expr::Var(_) => "Var",
             Expr::Param(_) => "Param",
             Expr::Add(..) => "Add",
             Expr::Sub(..) => "Sub",
             Expr::Mul(..) => "Mul",
+            Expr::CheckedAdd(..) => "CheckedAdd",
+            Expr::CheckedSub(..) => "CheckedSub",
+            Expr::CheckedMul(..) => "CheckedMul",
+            Expr::CheckedNeg(..) => "CheckedNeg",
+            Expr::CheckedDiv(..) => "CheckedDiv",
+            Expr::BitAnd(..) => "BitAnd",
+            Expr::BitOr(..) => "BitOr",
+            Expr::BitXor(..) => "BitXor",
+            Expr::BitNot(..) => "BitNot",
+            Expr::CheckedShl(..) => "CheckedShl",
+            Expr::CheckedShr(..) => "CheckedShr",
+            Expr::CheckedConvert(..) => "CheckedConvert",
+            Expr::Append(..) => "Append",
+            Expr::Length(..) => "Length",
+            Expr::Index(..) => "Index",
+            Expr::Slice(..) => "Slice",
+            Expr::Utf8Encode(..) => "Utf8Encode",
+            Expr::Utf8Decode(..) => "Utf8Decode",
+            Expr::CompareBytes(..) => "CompareBytes",
+            Expr::SplitExact(..) => "SplitExact",
+            Expr::Join(..) => "Join",
+            Expr::ParseDecimal(..) => "ParseDecimal",
+            Expr::FormatDecimal(..) => "FormatDecimal",
+            Expr::Quotient(..) => "Quotient",
+            Expr::Remainder(..) => "Remainder",
+            Expr::Negate(..) => "Negate",
             Expr::Div(..) => "Div",
             Expr::Mod(..) => "Mod",
             Expr::Shl(..) => "Shl",
@@ -318,6 +445,7 @@ mod tests {
             // Leaves.
             (Expr::Nat(1), vec![]),
             (Expr::Int(-1), vec![]),
+            (Expr::String(String::from("text")), vec![]),
             (Expr::Bool(true), vec![]),
             (v("x"), vec![]),
             (Expr::Param(0), vec![]),
@@ -328,10 +456,32 @@ mod tests {
                 Expr::Proj(String::from("T"), String::from("f"), bx("a")),
                 vec!["a"],
             ),
+            (Expr::CheckedNeg(bx("a")), vec!["a"]),
+            (Expr::BitNot(bx("a")), vec!["a"]),
+            (Expr::CheckedConvert(bx("a")), vec!["a"]),
+            (Expr::Length(bx("a")), vec!["a"]),
+            (Expr::Utf8Encode(bx("a")), vec!["a"]),
+            (Expr::Utf8Decode(bx("a")), vec!["a"]),
+            (Expr::ParseDecimal(bx("a")), vec!["a"]),
+            (Expr::FormatDecimal(bx("a")), vec!["a"]),
+            (Expr::Negate(bx("a")), vec!["a"]),
             // Binary.
             (Expr::Add(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Sub(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Mul(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedAdd(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedSub(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedMul(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedDiv(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::BitAnd(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::BitOr(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::BitXor(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedShl(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CheckedShr(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::Append(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::Index(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::CompareBytes(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::Join(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Div(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Mod(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Shl(bx("a"), bx("b")), vec!["a", "b"]),
@@ -341,6 +491,19 @@ mod tests {
             (Expr::Lt(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Le(bx("a"), bx("b")), vec!["a", "b"]),
             (Expr::Gt(bx("a"), bx("b")), vec!["a", "b"]),
+            (Expr::Slice(bx("a"), bx("b"), bx("c")), vec!["a", "b", "c"]),
+            (
+                Expr::SplitExact(bx("a"), bx("b"), bx("c")),
+                vec!["a", "b", "c"],
+            ),
+            (
+                Expr::Quotient(bx("a"), bx("b"), bx("c")),
+                vec!["a", "b", "c"],
+            ),
+            (
+                Expr::Remainder(bx("a"), bx("b"), bx("c")),
+                vec!["a", "b", "c"],
+            ),
             // Control flow and binders.
             (Expr::If(bx("c"), bx("t"), bx("f")), vec!["c", "t", "f"]),
             (

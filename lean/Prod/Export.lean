@@ -36,8 +36,7 @@ def collectTypeDecls (ctx : LowerCtx) (extracted : Array ExtractedDef)
   for ed in extracted do
     if let some decl := ed.decl? then
       for n in declTypeNames env decl do
-        if n != ``Nat && n != ``Bool && n != ``Int && n != ``Prod
-            && n != ``List && n != ``Option && !wanted.contains n then
+        if !isPortableBuiltinTypeName n && !wanted.contains n then
           if (env.find? n).isSome then
             wanted := wanted.push n
   let sorted := wanted.qsort fun a b => Name.quickCmp a b == .lt
@@ -149,6 +148,12 @@ def namedClosure (roots : Array Name) : CoreM (Array Name × Array Name) := do
       (fun value => value.getUsedConstants.qsort (namedOrder · · == .lt)) |>.getD #[]
     for dependency in dependencies do
       if included.contains dependency || erased.contains dependency then
+        continue
+      -- A closed LexLean semantic primitive is lowered at its call site by
+      -- `lexLeanPrimitive?`. Pulling its generic typeclass implementation into
+      -- the application closure would duplicate the compiler runtime and make
+      -- target semantics depend on incidental implementation details.
+      if isLexLeanRuntimeName dependency || isErasedPortableDictionary dependency then
         continue
       -- Compiler-generated equation/matcher helpers are internal details of
       -- the owning declaration. The LCNF simplifier internalizes them while

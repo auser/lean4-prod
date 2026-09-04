@@ -8,12 +8,24 @@ named error rather than silently mis-compiled.
 
 ## Types
 
-- `Nat`
+- `Nat (bounded u64 target policy)`
 - `Bool`
-- `Int (renders as i64; no Int operators are whitelisted, so Int arithmetic is rejected as UnresolvedCall)`
+- `Int (mathematical; target closure rejected as UnboundedInt)`
+- `Int8`
+- `Int16`
+- `Int32`
+- `Int64`
+- `UInt8`
+- `UInt16`
+- `UInt32`
+- `UInt64`
+- `String`
+- `ByteArray`
+- `Ordering`
 - `Prod`
 - `List`
 - `Option`
+- `Except`
 - `parameterless, non-recursive, single-constructor structures (Prop fields erased)`
 
 **Erased invariants.** A Lean structure may carry `Prop` fields
@@ -62,6 +74,7 @@ Everything else fails, precisely:
 | `UnsupportedFieldType` | a field type not allowed in an allocation-free generated type (e.g. a list or vector field, which would need owned storage) |
 | `DuplicateTypeName` | two Lean types share a last name component, so they would collide in Rust |
 | `OpaqueType` | a type reached codegen with no Rust rendering |
+| `UnboundedInt` | mathematical Lean Int reaches a fixed-width runtime target |
 | `UnresolvedCall` | the callee is neither @[prod]-tagged nor a whitelisted operator, so there is nothing to call |
 | `UnknownField` | a projection names a field the declared type does not have |
 | `UnsupportedJoinPoint` | a join point with several callers, or one that jumps to itself; only the single-caller form, which inlines at its jump site, has a lowering |

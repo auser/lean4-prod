@@ -54,7 +54,7 @@ impl fmt::Display for CAbiError {
         match self {
             Self::UnsupportedType { definition, ty } => write!(
                 f,
-                "C ABI only supports scalar Nat, Int, and Bool values: `{}` in `{}`",
+                "C ABI only supports scalar Nat, Int64, and Bool values: `{}` in `{}`",
                 ty, definition
             ),
             Self::UnsupportedDefinition { definition, reason } => {
@@ -101,7 +101,7 @@ impl Scalar {
 fn scalar(definition: &Definition, ty: &Type) -> Result<Scalar, CAbiError> {
     match ty {
         Type::Nat => Ok(Scalar::Nat),
-        Type::Int => Ok(Scalar::Int),
+        Type::Int64 => Ok(Scalar::Int),
         Type::Bool => Ok(Scalar::Bool),
         other => Err(CAbiError::UnsupportedType {
             definition: definition.name.clone(),

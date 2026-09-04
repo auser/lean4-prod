@@ -9,7 +9,8 @@
 //! field    ::= "(" ident type ")"
 //! def      ::= "(" "def" ident "(" param* ")" type expr ")"
 //! param    ::= "(" ident type ")"
-//! type     ::= "Nat" | "Int" | "Bool" | "(" "Option" type ")" | "(" "Vec" type ")"
+//! type     ::= "Nat" | "Int" | fixed-int | "String" | "Bytes" | "Ordering" | "Bool"
+//!            | "(" "Option" type ")" | "(" "Result" type type ")" | "(" "Vec" type ")"
 //!            | "(" "List" type ")" | "(" "Tuple" type* ")" | "(" "named" '"' ident '"' ")"
 //!            | "(" "opaque" '"' ident '"' ")"
 //! expr     ::= nat | ident | "(" "param" nat ")"
@@ -27,6 +28,7 @@
 //!            | "(" "jmp" ident expr* ")"                   ; LCNF jump
 //!            | "(" "unreachable" ")"
 //!            | "(" "extern" '"' ident '"' expr* ")"        ; unresolved callee
+//!            | portable-op | "(" "string" json-string ")"
 //! alt      ::= "(" "alt" '"' ident '"' "(" ident* ")" expr ")"
 //! default  ::= "(" "default" expr ")"
 //! comment  ::= ";;" ... end-of-line                       ; skipped as whitespace
@@ -41,6 +43,7 @@ use nom::{
     bytes::complete::{tag, take_till, take_while1},
     character::complete::{char, digit1, multispace1},
     combinator::{map, map_res, opt, value},
+    error::{Error as NomError, ErrorKind},
     multi::many0,
     sequence::{delimited, preceded, terminated, tuple},
     IResult,
@@ -75,6 +78,29 @@ fn quoted_ident(input: &str) -> IResult<&str, String> {
     delimited(char('"'), ident, char('"'))(input)
 }
 
+/// One JSON-escaped UTF-8 string. The exporter uses Lean's JSON escaper, so
+/// this parser shares the same closed escape syntax instead of inventing a
+/// second string grammar for the IR.
+fn quoted_string(input: &str) -> IResult<&str, String> {
+    if !input.starts_with('"') {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Char)));
+    }
+    let mut escaped = false;
+    for (index, byte) in input.as_bytes().iter().copied().enumerate().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            let raw = &input[..=index];
+            let value = serde_json::from_str(raw)
+                .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Escaped)))?;
+            return Ok((&input[index + 1..], value));
+        }
+    }
+    Err(nom::Err::Error(NomError::new(input, ErrorKind::Escaped)))
+}
+
 fn parse_u64(input: &str) -> IResult<&str, u64> {
     map_res(digit1, |s: &str| s.parse::<u64>())(input)
 }
@@ -99,11 +125,33 @@ fn parse_i64(input: &str) -> IResult<&str, i64> {
 fn parse_type(input: &str) -> IResult<&str, Type> {
     ws(alt((
         value(Type::Nat, tag("Nat")),
+        value(Type::Int8, tag("Int8")),
+        value(Type::Int16, tag("Int16")),
+        value(Type::Int32, tag("Int32")),
+        value(Type::Int64, tag("Int64")),
+        value(Type::UInt8, tag("UInt8")),
+        value(Type::UInt16, tag("UInt16")),
+        value(Type::UInt32, tag("UInt32")),
+        value(Type::UInt64, tag("UInt64")),
         value(Type::Int, tag("Int")),
+        value(Type::String, tag("String")),
+        value(Type::Bytes, tag("Bytes")),
+        value(Type::Ordering, tag("Ordering")),
         value(Type::Bool, tag("Bool")),
         map(
             delimited(char('('), tuple((tag("Option"), parse_type)), char(')')),
             |(_, t)| Type::Option(Box::new(t)),
+        ),
+        map(
+            delimited(
+                char('('),
+                tuple((tag("Result"), parse_type, parse_type)),
+                char(')'),
+            ),
+            |(_, ok, error)| Type::Result {
+                ok: Box::new(ok),
+                error: Box::new(error),
+            },
         ),
         map(
             delimited(char('('), tuple((tag("Vec"), parse_type)), char(')')),
@@ -319,6 +367,134 @@ fn parse_paren_expr(input: &str) -> IResult<&str, Expr> {
                     |(_, name, args)| Expr::Extern(name, args),
                 ),
             )),
+            alt((
+                map(
+                    tuple((tag("checked-add"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedAdd(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("checked-sub"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedSub(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("checked-mul"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedMul(Box::new(a), Box::new(b)),
+                ),
+                map(tuple((tag("checked-neg"), ws(parse_expr))), |(_, value)| {
+                    Expr::CheckedNeg(Box::new(value))
+                }),
+                map(
+                    tuple((tag("checked-div"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedDiv(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("bit-and"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::BitAnd(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("bit-or"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::BitOr(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("bit-xor"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::BitXor(Box::new(a), Box::new(b)),
+                ),
+                map(tuple((tag("bit-not"), ws(parse_expr))), |(_, value)| {
+                    Expr::BitNot(Box::new(value))
+                }),
+                map(
+                    tuple((tag("checked-shl"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedShl(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((tag("checked-shr"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CheckedShr(Box::new(a), Box::new(b)),
+                ),
+            )),
+            alt((
+                map(
+                    tuple((tag("checked-convert"), ws(parse_expr))),
+                    |(_, value)| Expr::CheckedConvert(Box::new(value)),
+                ),
+                map(
+                    tuple((tag("append"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::Append(Box::new(a), Box::new(b)),
+                ),
+                map(tuple((tag("length"), ws(parse_expr))), |(_, value)| {
+                    Expr::Length(Box::new(value))
+                }),
+                map(
+                    tuple((tag("index"), ws(parse_expr), ws(parse_expr))),
+                    |(_, value, offset)| Expr::Index(Box::new(value), Box::new(offset)),
+                ),
+                map(
+                    tuple((tag("slice"), ws(parse_expr), ws(parse_expr), ws(parse_expr))),
+                    |(_, value, start, count)| {
+                        Expr::Slice(Box::new(value), Box::new(start), Box::new(count))
+                    },
+                ),
+                map(tuple((tag("utf8-encode"), ws(parse_expr))), |(_, value)| {
+                    Expr::Utf8Encode(Box::new(value))
+                }),
+                map(tuple((tag("utf8-decode"), ws(parse_expr))), |(_, value)| {
+                    Expr::Utf8Decode(Box::new(value))
+                }),
+                map(
+                    tuple((tag("compare-bytes"), ws(parse_expr), ws(parse_expr))),
+                    |(_, a, b)| Expr::CompareBytes(Box::new(a), Box::new(b)),
+                ),
+                map(
+                    tuple((
+                        tag("split-exact"),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                    )),
+                    |(_, value, delimiter, maximum)| {
+                        Expr::SplitExact(Box::new(value), Box::new(delimiter), Box::new(maximum))
+                    },
+                ),
+                map(
+                    tuple((tag("join"), ws(parse_expr), ws(parse_expr))),
+                    |(_, values, delimiter)| Expr::Join(Box::new(values), Box::new(delimiter)),
+                ),
+                map(
+                    tuple((tag("parse-decimal"), ws(parse_expr))),
+                    |(_, value)| Expr::ParseDecimal(Box::new(value)),
+                ),
+                map(
+                    tuple((tag("format-decimal"), ws(parse_expr))),
+                    |(_, value)| Expr::FormatDecimal(Box::new(value)),
+                ),
+                map(
+                    tuple((
+                        tag("quotient"),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                    )),
+                    |(_, left, right, zero)| {
+                        Expr::Quotient(Box::new(left), Box::new(right), Box::new(zero))
+                    },
+                ),
+                map(
+                    tuple((
+                        tag("remainder"),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                        ws(parse_expr),
+                    )),
+                    |(_, left, right, zero)| {
+                        Expr::Remainder(Box::new(left), Box::new(right), Box::new(zero))
+                    },
+                ),
+                map(tuple((tag("negate"), ws(parse_expr))), |(_, value)| {
+                    Expr::Negate(Box::new(value))
+                }),
+                map(tuple((tag("string"), ws(quoted_string))), |(_, value)| {
+                    Expr::String(value)
+                }),
+            )),
         ))),
         ws(char(')')),
     )(input)
@@ -498,6 +674,28 @@ mod tests {
             Expr::Add(_, _) => {}
             _ => panic!("Expected Add, got {:?}", expr),
         }
+    }
+
+    #[test]
+    fn test_parse_portable_operations_and_utf8_string() {
+        assert_eq!(
+            parse_expr("(checked-convert value)").unwrap().1,
+            Expr::CheckedConvert(Box::new(Expr::Var("value".to_string())))
+        );
+        assert!(matches!(
+            parse_expr("(slice value start count)").unwrap().1,
+            Expr::Slice(..)
+        ));
+        assert!(matches!(
+            parse_expr("(split-exact value delimiter maximum)")
+                .unwrap()
+                .1,
+            Expr::SplitExact(..)
+        ));
+        assert_eq!(
+            parse_expr(r#"(string "portable ✓\n\"ok\"")"#).unwrap().1,
+            Expr::String("portable ✓\n\"ok\"".to_string())
+        );
     }
 
     #[test]

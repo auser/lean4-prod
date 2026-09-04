@@ -27,11 +27,20 @@
 //! keeps the blast radius to that file.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Every allocation, reallocation, and deallocation the process has performed
 /// since start-up, as one saturating counter.
 static ACTIVITY: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// Scoped measurements deliberately ignore allocator traffic from the
+    /// test harness and other worker threads. Both cells have const
+    /// initializers, so entering the measurement cannot itself allocate.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+    static SCOPED_ACTIVITY: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Total heap operations observed so far.
 ///
@@ -39,6 +48,36 @@ static ACTIVITY: AtomicUsize = AtomicUsize::new(0);
 /// itself allocates before and after the code under test.
 pub fn activity() -> usize {
     ACTIVITY.load(Ordering::Relaxed)
+}
+
+/// Run `body` while counting heap operations performed by its current thread.
+///
+/// The process-global [`activity`] counter is useful as an installation
+/// tripwire, but a test runner may allocate concurrently on another thread.
+/// This scoped counter isolates the generated call without hiding any
+/// allocation, reallocation, or deallocation it performs. Measurements may
+/// not be nested.
+pub fn measure<T>(body: impl FnOnce() -> T) -> (T, usize) {
+    MEASURING.with(|measuring| {
+        assert!(
+            !measuring.replace(true),
+            "allocator measurements may not nest"
+        );
+    });
+    SCOPED_ACTIVITY.with(|activity| activity.set(0));
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            MEASURING.with(|measuring| measuring.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let value = body();
+    let count = SCOPED_ACTIVITY.with(Cell::get);
+    drop(reset);
+    (value, count)
 }
 
 /// A pass-through global allocator that counts every heap operation.
@@ -52,6 +91,12 @@ impl CountingAllocator {
         // `Relaxed` is enough: tests that read this counter run serially, and
         // the counter is a tripwire, not a synchronisation point.
         ACTIVITY.fetch_add(1, Ordering::Relaxed);
+        let measuring = MEASURING.try_with(Cell::get).unwrap_or(false);
+        if measuring {
+            let _ = SCOPED_ACTIVITY.try_with(|activity| {
+                activity.set(activity.get().saturating_add(1));
+            });
+        }
     }
 }
 

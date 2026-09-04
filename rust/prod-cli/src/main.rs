@@ -8,8 +8,9 @@
 mod roots;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +36,65 @@ enum Commands {
         /// Output path for generated Rust code
         #[arg(short, long)]
         output: Option<String>,
+    },
+    /// Generate a complete deterministic publishable Cargo library tree.
+    Cargo {
+        /// Path to the exported IR file.
+        path: String,
+        /// New output directory; an existing path is rejected.
+        #[arg(short, long)]
+        output: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        homepage: String,
+        #[arg(long)]
+        readme: String,
+        #[arg(long)]
+        license_mit: String,
+        #[arg(long)]
+        license_apache: String,
+        /// Exact registry dependency as NAME=VERSION=CRATE_SHA256; repeat in
+        /// bytewise package-name order.
+        #[arg(long = "dependency")]
+        dependencies: Vec<String>,
+    },
+    /// Generate an import-free Hologram Core-Wasm v1 guest package.
+    CoreWasm {
+        /// Path to the exported IR file.
+        path: String,
+        /// New output directory; an existing path is rejected.
+        #[arg(short, long)]
+        output: String,
+        /// Exported IR definition with `(List UInt8) -> List UInt8` type.
+        #[arg(long)]
+        entry: String,
+        /// Hologram manifest entry/export name.
+        #[arg(long, default_value = "holo_run")]
+        export_name: String,
+        #[arg(long, default_value_t = 65_536)]
+        input_allocation_cap: u32,
+        #[arg(long, default_value_t = 65_536)]
+        output_allocation_cap: u32,
+        #[arg(long, default_value_t = 4)]
+        maximum_pages: u32,
+        #[arg(long, default_value = "lean4-prod-core-wasm")]
+        crate_name: String,
+    },
+    /// Project a closed evaluated Foundation.View.V1 JSON value to Hologram
+    /// and browser assets plus the registry-bound wasm adapter.
+    View {
+        /// Closed evaluated View/binding JSON input.
+        input: String,
+        /// New output directory; an existing path is rejected.
+        #[arg(short, long)]
+        output: String,
     },
     /// Generate a C header and matching Rust `extern "C"` wrappers.
     Header {
@@ -106,6 +166,53 @@ enum SdkLanguage {
     Typescript,
     Kotlin,
     Wasm,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewInput {
+    view: ViewValue,
+    binding: ViewBinding,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewValue {
+    title: String,
+    heading: String,
+    left_label: String,
+    right_label: String,
+    operation_label: String,
+    submit_label: String,
+    input_error: String,
+    division_by_zero_error: String,
+    overflow_error: String,
+    operations: Vec<ViewOperationInput>,
+    initial_operation: u8,
+    model_id: String,
+    view_model_id: String,
+    generated_core_sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewOperationInput {
+    label: String,
+    request_name: String,
+    rust_variant: String,
+    discriminant: u8,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewBinding {
+    package_name: String,
+    package_version: String,
+    core_crate_name: String,
+    core_crate_version: String,
+    core_operation_type: String,
+    core_error_type: String,
+    core_function: String,
 }
 
 /// The Lean half of the subset contract, written by `prod-export`
@@ -257,6 +364,59 @@ fn copy_directory_contents(source: &Path, destination: &Path) {
     }
 }
 
+fn publish_generated_package(package: prod_codegen::GeneratedPackage, output: &Path) {
+    if output.exists() {
+        panic!(
+            "Refusing to replace existing generated package {}",
+            output.display()
+        );
+    }
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", parent.display()));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_nanos();
+    let staging = parent.join(format!(
+        ".lean4-prod-package-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&staging)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", staging.display()));
+    for item in package.files {
+        let relative = Path::new(&item.path);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            let _ = fs::remove_dir_all(&staging);
+            panic!("Generated package contains unsafe path {}", item.path);
+        }
+        let destination = staging.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("Failed to create {}: {e}", parent.display()));
+        }
+        fs::write(&destination, item.bytes)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", destination.display()));
+    }
+    fs::rename(&staging, output).unwrap_or_else(|e| {
+        let _ = fs::remove_dir_all(&staging);
+        panic!(
+            "Failed to publish generated package {} atomically: {e}",
+            output.display()
+        )
+    });
+}
+
 fn build_wasm_sdk(source: &str, output: &Path, stem: &str) {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -355,6 +515,166 @@ fn main() {
                 }
                 None => print!("{}", out),
             }
+        }
+        Commands::Cargo {
+            path,
+            output,
+            name,
+            version,
+            description,
+            repository,
+            homepage,
+            readme,
+            license_mit,
+            license_apache,
+            dependencies,
+        } => {
+            let ir = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+            let text = std::str::from_utf8(&ir)
+                .unwrap_or_else(|e| panic!("IR {} is not UTF-8: {}", path, e));
+            let (_, module) = prod_ir::parser::parse_module(text)
+                .unwrap_or_else(|e| panic!("Parse error: {:?}", e));
+            let package = prod_codegen::generate_cargo_package(
+                &module,
+                &prod_codegen::CargoPackageSpec {
+                    name,
+                    version,
+                    description,
+                    repository,
+                    homepage,
+                    readme: fs::read_to_string(&readme)
+                        .unwrap_or_else(|e| panic!("Failed to read {}: {}", readme, e)),
+                    license_mit: fs::read_to_string(&license_mit)
+                        .unwrap_or_else(|e| panic!("Failed to read {}: {}", license_mit, e)),
+                    license_apache: fs::read_to_string(&license_apache)
+                        .unwrap_or_else(|e| panic!("Failed to read {}: {}", license_apache, e)),
+                    input_sha256: format!("{:x}", Sha256::digest(&ir)),
+                    dependencies: dependencies
+                        .into_iter()
+                        .map(|value| {
+                            let fields = value.split('=').collect::<Vec<_>>();
+                            if fields.len() != 3 {
+                                panic!(
+                                    "Invalid --dependency {value}; expected NAME=VERSION=CRATE_SHA256"
+                                );
+                            }
+                            prod_codegen::CargoDependency {
+                                name: fields[0].to_owned(),
+                                version: fields[1].to_owned(),
+                                checksum: fields[2].to_owned(),
+                                default_features: false,
+                                features: Vec::new(),
+                            }
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap_or_else(|e| panic!("Cargo package generation error: {}", e));
+            let root = Path::new(&output);
+            publish_generated_package(package, root);
+            println!("Generated Cargo package: {}", root.display());
+        }
+        Commands::CoreWasm {
+            path,
+            output,
+            entry,
+            export_name,
+            input_allocation_cap,
+            output_allocation_cap,
+            maximum_pages,
+            crate_name,
+        } => {
+            let ir = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+            let text = std::str::from_utf8(&ir)
+                .unwrap_or_else(|e| panic!("IR {} is not UTF-8: {}", path, e));
+            let (_, module) = prod_ir::parser::parse_module(text)
+                .unwrap_or_else(|e| panic!("Parse error: {:?}", e));
+            let package = prod_codegen::generate_core_wasm_package(
+                &module,
+                &prod_codegen::CoreWasmSpec {
+                    crate_name,
+                    entry,
+                    export_name,
+                    input_allocation_cap,
+                    output_allocation_cap,
+                    maximum_pages,
+                    input_ir_sha256: format!("{:x}", Sha256::digest(&ir)),
+                },
+            )
+            .unwrap_or_else(|e| panic!("Core-Wasm generation error: {}", e));
+            let root = Path::new(&output);
+            publish_generated_package(package, root);
+            println!("Generated Core-Wasm package: {}", root.display());
+        }
+        Commands::View { input, output } => {
+            let value: ViewInput = serde_json::from_slice(
+                &fs::read(&input).unwrap_or_else(|error| panic!("Failed to read {input}: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("Invalid closed View input {input}: {error}"));
+            let view = prod_codegen::EvaluatedViewV1 {
+                title: value.view.title,
+                heading: value.view.heading,
+                left_label: value.view.left_label,
+                right_label: value.view.right_label,
+                operation_label: value.view.operation_label,
+                submit_label: value.view.submit_label,
+                input_error: value.view.input_error,
+                division_by_zero_error: value.view.division_by_zero_error,
+                overflow_error: value.view.overflow_error,
+                operations: value
+                    .view
+                    .operations
+                    .into_iter()
+                    .map(|operation| prod_codegen::ViewOperation {
+                        label: operation.label,
+                        request_name: operation.request_name,
+                        rust_variant: operation.rust_variant,
+                        discriminant: operation.discriminant,
+                    })
+                    .collect(),
+                initial_operation: value.view.initial_operation,
+                model_id: value.view.model_id,
+                view_model_id: value.view.view_model_id,
+                generated_core_sha256: value.view.generated_core_sha256,
+            };
+            let binding = prod_codegen::BrowserAdapterBinding {
+                package_name: value.binding.package_name,
+                package_version: value.binding.package_version,
+                core_crate_name: value.binding.core_crate_name,
+                core_crate_version: value.binding.core_crate_version,
+                core_operation_type: value.binding.core_operation_type,
+                core_error_type: value.binding.core_error_type,
+                core_function: value.binding.core_function,
+            };
+            let generated = prod_codegen::generate_view_v1(&view, &binding)
+                .unwrap_or_else(|error| panic!("View generation error: {error}"));
+            let mut files = Vec::new();
+            for item in generated.hologram_assets {
+                files.push(prod_codegen::PackageFile {
+                    path: format!("hologram/{}", item.path),
+                    bytes: item.bytes,
+                });
+            }
+            files.push(prod_codegen::PackageFile {
+                path: format!("hologram/{}", generated.hologram_bundle.path),
+                bytes: generated.hologram_bundle.bytes,
+            });
+            for item in generated.browser_assets {
+                files.push(prod_codegen::PackageFile {
+                    path: format!("browser/{}", item.path),
+                    bytes: item.bytes,
+                });
+            }
+            for item in generated.browser_adapter.files {
+                files.push(prod_codegen::PackageFile {
+                    path: format!("browser-adapter/{}", item.path),
+                    bytes: item.bytes,
+                });
+            }
+            files.push(generated.view_manifest);
+            files.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+            publish_generated_package(prod_codegen::GeneratedPackage { files }, Path::new(&output));
+            println!("Generated View projections: {output}");
         }
         Commands::Header {
             path,

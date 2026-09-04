@@ -37,3 +37,4 @@ proc-macro2 = "1"
 quote = "1"
 syn = "2"
 clap = { version = "4", features = ["derive"] }
+sha2 = { version = "0.10", default-features = false }

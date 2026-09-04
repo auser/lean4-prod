@@ -11,7 +11,7 @@
 //! Must run serially (`just no-alloc` passes `--test-threads=1`): the counter
 //! is process-global.
 
-use prod_alloc_counter::{activity, CountingAllocator};
+use prod_alloc_counter::{activity, measure, CountingAllocator};
 use prod_core::{
     belt, classDecode, classIndex, class_count, digitCount, digitSum, digits, sameClass,
     smallEnough, stride, tryClassDecode, ComputeError, Instance,
@@ -27,14 +27,11 @@ const CANONICAL: Instance = Instance { q: 4, T: 3, O: 8 };
 /// The closure is `#[inline(never)]`-free on purpose: whatever the optimiser
 /// does, an allocation would still pass through the global allocator.
 fn assert_no_allocation<T>(what: &str, body: impl FnOnce() -> T) -> T {
-    let before = activity();
-    let value = body();
-    let after = activity();
+    let (value, operations) = measure(body);
     assert_eq!(
-        after,
-        before,
+        operations, 0,
         "{what} performed {} heap operation(s); generated code must be allocation-free",
-        after - before
+        operations
     );
     value
 }
@@ -53,6 +50,11 @@ fn generated_definitions_never_touch_the_heap() -> Result<(), ComputeError> {
     assert!(
         activity() > before,
         "the counting allocator is not installed; the no-alloc assertions prove nothing"
+    );
+    let (_, measured) = measure(|| drop(Box::new(7u64)));
+    assert!(
+        measured >= 2,
+        "the thread-scoped allocation counter is not armed"
     );
 
     // Scalar definitions.

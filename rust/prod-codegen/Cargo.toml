@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 prod-ir = { version = "0.1.0", path = "../prod-ir" }
+sha2 = { workspace = true }

@@ -40,8 +40,9 @@
 //!
 //! ## Error contract: fallibility is precise, not uniform
 //!
-//! Lean `Nat` maps to bounded `u64` and Lean `Int` to `i64`. The partial
-//! operations report failure instead of panicking: addition, multiplication,
+//! Lean `Nat` maps to bounded `u64`, fixed-width Lean `Int64` maps to `i64`,
+//! and mathematical Lean `Int` is rejected as [`Error::UnboundedInt`] rather
+//! than silently narrowed. The partial operations report failure instead of panicking: addition, multiplication,
 //! shifts, and powers render as `checked_*(..).ok_or(crate::ComputeError::X)?`
 //! (with the shift/power exponent narrowed through
 //! `u32::try_from(..).map_err(..)?`). Subtraction saturates at zero (Lean Nat
@@ -104,9 +105,12 @@
 extern crate alloc;
 
 mod c_abi;
+mod core_wasm;
+mod package;
 mod sdk;
+mod view;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -114,7 +118,15 @@ use core::fmt;
 use prod_ir::{Alt, CtorDecl, Definition, Expr, Module, Type, TypeDecl};
 
 pub use c_abi::{generate_c_bindings, CAbiError, CBindings};
+pub use core_wasm::{generate_core_wasm_package, CoreWasmSpec};
+pub use package::{
+    generate_cargo_package, CargoDependency, CargoPackageSpec, GeneratedPackage, PackageFile,
+};
 pub use sdk::{generate_sdks, SdkBindings};
+pub use view::{
+    generate_holoview_bundle, generate_view_v1, BrowserAdapterBinding, EvaluatedViewV1,
+    GeneratedViewV1, ViewOperation,
+};
 
 /// Errors that can occur during code generation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +151,8 @@ pub enum Error {
     DuplicateTypeName(String),
     /// A type reached codegen with no rendering.
     OpaqueType(String),
+    /// Mathematical Lean `Int` has no exact fixed-width Rust representation.
+    UnboundedInt,
     /// The exporter could not resolve a callee to a generated definition.
     UnresolvedCall(String),
     /// A projection names a field the declared type does not have. Catches a
@@ -180,6 +194,10 @@ impl fmt::Display for Error {
                 write!(f, "two Lean types share the last name component `{}`", s)
             }
             Error::OpaqueType(s) => write!(f, "no Rust rendering for type: {}", s),
+            Error::UnboundedInt => write!(
+                f,
+                "mathematical Lean `Int` is unbounded and cannot be represented by a fixed-width Rust integer"
+            ),
             Error::UnresolvedCall(s) => write!(
                 f,
                 "`{}` is neither @[prod]-tagged nor a whitelisted operator, so there is nothing to call",
@@ -238,6 +256,10 @@ pub const REJECTIONS: &[(&str, &str)] = &[
     (
         "OpaqueType",
         "a type reached codegen with no Rust rendering",
+    ),
+    (
+        "UnboundedInt",
+        "mathematical Lean Int reaches a fixed-width runtime target",
     ),
     (
         "UnresolvedCall",
@@ -328,9 +350,33 @@ fn type_table(types: &[TypeDecl]) -> Result<TypeTable<'_>, Error> {
 /// Render one type declaration: a struct if it has exactly one constructor,
 /// otherwise an enum with named-field variants.
 ///
-/// Every generated type is `Copy`, which is what keeps it inside the
-/// allocation-free tier: a type is eligible only if every field is a scalar, a
-/// tuple of eligible types, or another eligible generated type.
+fn copy_type(ty: &Type, table: &TypeTable, visiting: &mut BTreeSet<String>) -> bool {
+    match ty {
+        Type::String | Type::Bytes | Type::List(_) | Type::Vec(_) => false,
+        Type::Named(name) => {
+            if !visiting.insert(name.clone()) {
+                return false;
+            }
+            let result = table.get(name.as_str()).is_some_and(|declaration| {
+                declaration.ctors.iter().all(|constructor| {
+                    constructor
+                        .fields
+                        .iter()
+                        .all(|(_, field)| copy_type(field, table, visiting))
+                })
+            });
+            visiting.remove(name);
+            result
+        }
+        Type::Option(inner) => copy_type(inner, table, visiting),
+        Type::Result { ok, error } => {
+            copy_type(ok, table, visiting) && copy_type(error, table, visiting)
+        }
+        Type::Tuple(items) => items.iter().all(|item| copy_type(item, table, visiting)),
+        _ => true,
+    }
+}
+
 fn generate_type_decl(decl: &TypeDecl, table: &TypeTable) -> Result<String, Error> {
     // The exporter reached this type but could not describe it. It is declared
     // anyway so that the rejection names a reason instead of an unknown type.
@@ -347,7 +393,17 @@ fn generate_type_decl(decl: &TypeDecl, table: &TypeTable) -> Result<String, Erro
         }
     }
 
-    let mut out = String::from("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
+    let is_copy = decl.ctors.iter().all(|constructor| {
+        constructor
+            .fields
+            .iter()
+            .all(|(_, field)| copy_type(field, table, &mut BTreeSet::new()))
+    });
+    let mut out = if is_copy {
+        String::from("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n")
+    } else {
+        String::from("#[derive(Debug, Clone, PartialEq, Eq)]\n")
+    };
     let short = last_component(&decl.name);
 
     if decl.ctors.len() == 1 {
@@ -364,11 +420,22 @@ fn generate_type_decl(decl: &TypeDecl, table: &TypeTable) -> Result<String, Erro
         return Ok(out);
     }
 
+    let fieldless = decl
+        .ctors
+        .iter()
+        .all(|constructor| constructor.fields.is_empty());
+    if fieldless && decl.ctors.len() <= (u8::MAX as usize) + 1 {
+        out.push_str("#[repr(u8)]\n");
+    }
     out.push_str(&format!("pub enum {} {{\n", rust_ident(short)));
-    for ctor in &decl.ctors {
+    for (index, ctor) in decl.ctors.iter().enumerate() {
         let variant = rust_ident(last_component(&ctor.name));
         if ctor.fields.is_empty() {
-            out.push_str(&format!("    {},\n", variant));
+            if fieldless && decl.ctors.len() <= (u8::MAX as usize) + 1 {
+                out.push_str(&format!("    {} = {},\n", variant, index));
+            } else {
+                out.push_str(&format!("    {},\n", variant));
+            }
             continue;
         }
         let mut fields = Vec::with_capacity(ctor.fields.len());
@@ -411,13 +478,7 @@ fn check_field_type(ty: &Type, owner: &str, field: &str, table: &TypeTable) -> R
                 None => Err(Error::OpaqueType(n.clone())),
             }
         }
-        // A sequence field would need owned storage, which the allocation-free
-        // tier does not have. Lists are supported as borrowed parameters and
-        // caller-owned output buffers only, never as owned struct fields.
-        Type::List(_) => Err(Error::UnsupportedFieldType(format!(
-            "`{}.{}`: a list field would need owned storage",
-            owner, field
-        ))),
+        Type::List(inner) => check_field_type(inner, owner, field, table),
         Type::Vec(_) => Err(Error::UnsupportedFieldType(format!(
             "`{}.{}`: a vector field would need heap storage",
             owner, field
@@ -429,6 +490,10 @@ fn check_field_type(ty: &Type, owner: &str, field: &str, table: &TypeTable) -> R
             Ok(())
         }
         Type::Option(inner) => check_field_type(inner, owner, field, table),
+        Type::Result { ok, error } => {
+            check_field_type(ok, owner, field, table)?;
+            check_field_type(error, owner, field, table)
+        }
         _ => Ok(()),
     }
 }
@@ -443,7 +508,7 @@ pub fn generate_module(module: &Module) -> Result<String, Error> {
         out.push('\n');
     }
     for def in &module.definitions {
-        out.push_str(&generate_def_in(def, &shapes, &table)?);
+        out.push_str(&generate_def_in(def, &module.definitions, &shapes, &table)?);
         out.push('\n');
     }
     Ok(out)
@@ -458,7 +523,7 @@ pub fn generate_module(module: &Module) -> Result<String, Error> {
 pub fn generate_def(def: &Definition) -> Result<String, Error> {
     let one = core::slice::from_ref(def);
     let table: TypeTable = BTreeMap::new();
-    generate_def_in(def, &signatures(one), &table)
+    generate_def_in(def, one, &signatures(one), &table)
 }
 
 /// Compute every definition's [`Shape`] as a least fixpoint over the call
@@ -509,6 +574,7 @@ fn is_fallible(expr: &Expr, shapes: &Signatures) -> bool {
 
 fn generate_def_in<'m>(
     def: &'m Definition,
+    definitions: &'m [Definition],
     shapes: &Signatures<'m>,
     table: &TypeTable<'m>,
 ) -> Result<String, Error> {
@@ -518,6 +584,7 @@ fn generate_def_in<'m>(
         .unwrap_or(Shape::Value);
     let renderer = Renderer {
         shapes,
+        definitions,
         params: &def.params,
         ctx: JpContext::collect(&def.body),
         types: table,
@@ -594,10 +661,24 @@ fn generate_def_in<'m>(
 fn type_to_rust(ty: &Type) -> Result<String, Error> {
     Ok(match ty {
         Type::Nat => String::from("u64"),
-        Type::Int => String::from("i64"),
+        Type::Int => return Err(Error::UnboundedInt),
+        Type::Int8 => String::from("i8"),
+        Type::Int16 => String::from("i16"),
+        Type::Int32 => String::from("i32"),
+        Type::Int64 => String::from("i64"),
+        Type::UInt8 => String::from("u8"),
+        Type::UInt16 => String::from("u16"),
+        Type::UInt32 => String::from("u32"),
+        Type::UInt64 => String::from("u64"),
+        Type::String => String::from("alloc::string::String"),
+        Type::Bytes => String::from("alloc::vec::Vec<u8>"),
+        Type::Ordering => String::from("core::cmp::Ordering"),
         Type::Bool => String::from("bool"),
         Type::Named(n) => format!("crate::{}", rust_ident(last_component(n))),
         Type::Option(inner) => format!("Option<{}>", type_to_rust(inner)?),
+        Type::Result { ok, error } => {
+            format!("Result<{}, {}>", type_to_rust(ok)?, type_to_rust(error)?)
+        }
         Type::Tuple(items) => {
             let mut rendered = Vec::with_capacity(items.len());
             for item in items {
@@ -606,14 +687,10 @@ fn type_to_rust(ty: &Type) -> Result<String, Error> {
             format!("({})", rendered.join(", "))
         }
         Type::Opaque(s) => return Err(Error::OpaqueType(s.clone())),
-        // Lists are only renderable at the top level of a parameter or return
-        // type, where the caller supplies the storage.
-        Type::List(inner) => {
-            return Err(Error::UnsupportedList(format!(
-                "(List {}) is only supported directly as a parameter or return type",
-                type_to_rust(inner).unwrap_or_else(|_| String::from("_"))
-            )))
-        }
+        // A top-level list parameter/return still uses the allocation-free
+        // slice/buffer ABI. Nested list values are explicit owned data and
+        // therefore use `Vec` in generated Cargo packages.
+        Type::List(inner) => format!("alloc::vec::Vec<{}>", type_to_rust(inner)?),
         Type::Vec(inner) => {
             return Err(Error::HeapType(format!(
                 "(Vec {})",
@@ -651,6 +728,10 @@ fn check_named_type(ty: &Type, table: &TypeTable) -> Result<(), Error> {
         }
         Type::Option(inner) | Type::Vec(inner) | Type::List(inner) => {
             check_named_type(inner, table)
+        }
+        Type::Result { ok, error } => {
+            check_named_type(ok, table)?;
+            check_named_type(error, table)
         }
         Type::Tuple(items) => {
             for item in items {
@@ -758,6 +839,7 @@ enum Mode<'x, 'm> {
 
 struct Renderer<'s, 'm> {
     shapes: &'s Signatures<'m>,
+    definitions: &'m [Definition],
     params: &'m [(String, Type)],
     ctx: JpContext<'m>,
     types: &'s TypeTable<'m>,
@@ -782,6 +864,27 @@ impl<'m> Renderer<'_, 'm> {
         self.shapes.get(name).copied()
     }
 
+    fn render_call_args(&self, name: &str, args: &'m [Expr]) -> Result<Vec<String>, Error> {
+        let definition = self
+            .definitions
+            .iter()
+            .find(|definition| definition.name == name);
+        args.iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let rendered = self.value(argument)?;
+                if definition
+                    .and_then(|definition| definition.params.get(index))
+                    .is_some_and(|(_, ty)| matches!(ty, Type::List(_)))
+                {
+                    Ok(format!("&({rendered})"))
+                } else {
+                    Ok(rendered)
+                }
+            })
+            .collect()
+    }
+
     /// Is this expression a list value (and therefore only renderable in
     /// builder position or as a `let` binding resolved through `env`)?
     fn is_list_valued(&self, expr: &Expr, env: &[(&'m str, &'m Expr)]) -> bool {
@@ -791,7 +894,13 @@ impl<'m> Renderer<'_, 'm> {
                 self.shape_of(name),
                 Some(Shape::Buffer) | Some(Shape::StaticList)
             ),
-            Expr::Var(name) => lookup(env, name).is_some(),
+            Expr::Var(name) => {
+                lookup(env, name).is_some()
+                    || self
+                        .params
+                        .iter()
+                        .any(|(parameter, ty)| parameter == name && matches!(ty, Type::List(_)))
+            }
             _ => false,
         }
     }
@@ -839,23 +948,32 @@ impl<'m> Renderer<'_, 'm> {
                 // constrains neither type parameter on its own, and it can
                 // appear under a `?` (as the tail of a cons).
                 Mode::Builder { .. } => Ok(String::from("Ok::<usize, crate::ComputeError>(0)")),
-                Mode::Value => Err(Error::UnsupportedList(
-                    "`List.nil` outside a list return position".to_string(),
-                )),
+                Mode::Value => Ok(String::from("alloc::vec::Vec::new()")),
             },
             Expr::Ctor(name, args) if name == "List.cons" && args.len() == 2 => match mode {
                 Mode::Builder { out, env, depth } => {
                     self.render_cons(&args[0], &args[1], out, env, *depth)
                 }
-                Mode::Value => Err(Error::UnsupportedList(
-                    "`List.cons` outside a list return position".to_string(),
+                Mode::Value => Ok(format!(
+                    "{{ let mut __list = alloc::vec![{}]; __list.extend({}); __list }}",
+                    self.value(&args[0])?,
+                    self.value(&args[1])?
                 )),
             },
 
             // ---- everything else ----
             Expr::Var(name) => match mode {
-                Mode::Builder { env, .. } => match lookup(env, name) {
+                Mode::Builder { out, env, .. } => match lookup(env, name) {
                     Some(bound) => self.render(bound, mode),
+                    None if self.params.iter().any(|(parameter, ty)| {
+                        parameter == name && matches!(ty, Type::List(_))
+                    }) =>
+                    {
+                        let source = rust_local_ident(name);
+                        Ok(format!(
+                            "if {source}.len() > ({out}).len() {{ Err(crate::ComputeError::OutputTooSmall) }} else {{ let __len = {source}.len(); ({out})[..__len].copy_from_slice({source}); Ok(__len) }}"
+                        ))
+                    }
                     None => Err(Error::UnsupportedList(format!(
                         "`{}` is not a list built in this definition",
                         name
@@ -864,7 +982,7 @@ impl<'m> Renderer<'_, 'm> {
                 Mode::Value => Ok(rust_local_ident(name)),
             },
             Expr::Call(name, args) => {
-                let rendered = self.render_args(args)?;
+                let rendered = self.render_call_args(name, args)?;
                 match (mode, self.shape_of(name)) {
                     (Mode::Builder { out, .. }, Some(Shape::Buffer)) => {
                         // The callee writes straight into our remaining buffer
@@ -907,6 +1025,9 @@ impl<'m> Renderer<'_, 'm> {
         match expr {
             Expr::Nat(n) => Ok(format!("{}", n)),
             Expr::Int(n) => Ok(format!("{}", n)),
+            Expr::String(value) => Ok(format!(
+                "alloc::string::String::from({value:?})"
+            )),
             Expr::Bool(b) => Ok(format!("{}", b)),
             Expr::Param(index) => self
                 .params
@@ -915,6 +1036,105 @@ impl<'m> Renderer<'_, 'm> {
                 .ok_or(Error::ParamOutOfBounds(*index)),
             Expr::Add(a, b) => self.checked_binop(a, b, "checked_add", "AddOverflow"),
             Expr::Mul(a, b) => self.checked_binop(a, b, "checked_mul", "MulOverflow"),
+            Expr::CheckedAdd(a, b) => Ok(format!(
+                "({}).checked_add({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::CheckedSub(a, b) => Ok(format!(
+                "({}).checked_sub({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::CheckedMul(a, b) => Ok(format!(
+                "({}).checked_mul({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::CheckedNeg(value) => Ok(format!("({}).checked_neg()", self.value(value)?)),
+            Expr::CheckedDiv(a, b) => Ok(format!(
+                "({}).checked_div({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::BitAnd(a, b) => self.binop(a, b, "&"),
+            Expr::BitOr(a, b) => self.binop(a, b, "|"),
+            Expr::BitXor(a, b) => self.binop(a, b, "^"),
+            Expr::BitNot(value) => Ok(format!("!({})", self.value(value)?)),
+            Expr::CheckedShl(a, b) => Ok(format!(
+                "({}).checked_shl({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::CheckedShr(a, b) => Ok(format!(
+                "({}).checked_shr({})",
+                self.value(a)?,
+                self.value(b)?
+            )),
+            Expr::CheckedConvert(value) => Ok(format!(
+                "core::convert::TryFrom::try_from({}).ok()",
+                self.value(value)?
+            )),
+            Expr::Append(left, right) => Ok(format!(
+                "{{ let mut __value = {}; __value.extend_from_slice(&{}); __value }}",
+                self.value(left)?,
+                self.value(right)?
+            )),
+            Expr::Length(value) => Ok(format!("({}).len() as u64", self.value(value)?)),
+            Expr::Index(value, offset) => Ok(format!(
+                "usize::try_from({}).ok().and_then(|__index| ({}).get(__index).cloned())",
+                self.value(offset)?,
+                self.value(value)?
+            )),
+            Expr::Slice(value, start, count) => Ok(format!(
+                "{{ let __start = usize::try_from({}).ok(); let __count = usize::try_from({}).ok(); match (__start, __count) {{ (Some(__start), Some(__count)) => __start.checked_add(__count).and_then(|__end| ({}).get(__start..__end).map(|__slice| __slice.to_vec())), _ => None }} }}",
+                self.value(start)?,
+                self.value(count)?,
+                self.value(value)?
+            )),
+            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.value(value)?)),
+            Expr::Utf8Decode(value) => Ok(format!(
+                "alloc::string::String::from_utf8({}).ok()",
+                self.value(value)?
+            )),
+            Expr::CompareBytes(left, right) => Ok(format!(
+                "({}).cmp(&{})",
+                self.value(left)?,
+                self.value(right)?
+            )),
+            Expr::SplitExact(value, delimiter, maximum) => Ok(format!(
+                "{{ let __value = {}; let __delimiter = {}; let __maximum = usize::try_from({}).ok(); if __delimiter.is_empty() {{ None }} else {{ let __fields: alloc::vec::Vec<alloc::string::String> = __value.split(&__delimiter).map(alloc::string::String::from).collect(); __maximum.filter(|__maximum| __fields.len() <= *__maximum).map(|_| __fields) }} }}",
+                self.value(value)?,
+                self.value(delimiter)?,
+                self.value(maximum)?
+            )),
+            Expr::Join(values, delimiter) => Ok(format!(
+                "({}).join(&{})",
+                self.value(values)?,
+                self.value(delimiter)?
+            )),
+            Expr::ParseDecimal(value) => Ok(format!(
+                "{{ let __text = {}; __text.parse().ok().filter(|__value| alloc::string::ToString::to_string(__value) == __text) }}",
+                self.value(value)?
+            )),
+            Expr::FormatDecimal(value) => {
+                Ok(format!("alloc::format!(\"{{}}\", {})", self.value(value)?))
+            }
+            Expr::Quotient(left, right, zero) => Ok(format!(
+                "if {} == 0 {{ {} }} else {{ {} / {} }}",
+                self.value(right)?,
+                self.value(zero)?,
+                self.value(left)?,
+                self.value(right)?
+            )),
+            Expr::Remainder(left, right, zero) => Ok(format!(
+                "if {} == 0 {{ {} }} else {{ {} % {} }}",
+                self.value(right)?,
+                self.value(zero)?,
+                self.value(left)?,
+                self.value(right)?
+            )),
+            Expr::Negate(value) => Ok(format!("-({})", self.value(value)?)),
             Expr::Sub(a, b) => {
                 // Lean Nat subtraction truncates at zero, so it is total.
                 // See `checked_binop` for the `as u64` receiver pin.
@@ -964,6 +1184,10 @@ impl<'m> Renderer<'_, 'm> {
                     Ok(String::from("None"))
                 } else if name == "Option.some" && args.len() == 1 {
                     Ok(format!("Some({})", args[0]))
+                } else if name == "Except.ok" && args.len() == 1 {
+                    Ok(format!("Ok({})", args[0]))
+                } else if name == "Except.error" && args.len() == 1 {
+                    Ok(format!("Err({})", args[0]))
                 } else if let Some((decl, cdecl)) = self.ctor_decl(name) {
                     if args.len() != cdecl.fields.len() {
                         return Err(Error::UnsupportedFieldType(format!(
@@ -1139,7 +1363,7 @@ impl<'m> Renderer<'_, 'm> {
                 // value so arithmetic on it needs no dereference syntax.
                 ("List.nil", 0) => format!("        [] => {},\n", body),
                 ("List.cons", 2) => format!(
-                    "        [{}, {} @ ..] => {{ let {} = *{}; {} }},\n",
+                    "        [{}, {} @ ..] => {{ let {} = {}.clone(); {} }},\n",
                     rust_local_ident(&alt.binders[0]),
                     rust_local_ident(&alt.binders[1]),
                     rust_local_ident(&alt.binders[0]),
@@ -1151,6 +1375,16 @@ impl<'m> Renderer<'_, 'm> {
                 ("Option.none", 0) => format!("        None => {},\n", body),
                 ("Option.some", 1) => format!(
                     "        Some({}) => {},\n",
+                    rust_local_ident(&alt.binders[0]),
+                    body
+                ),
+                ("Except.ok", 1) => format!(
+                    "        Ok({}) => {},\n",
+                    rust_local_ident(&alt.binders[0]),
+                    body
+                ),
+                ("Except.error", 1) => format!(
+                    "        Err({}) => {},\n",
                     rust_local_ident(&alt.binders[0]),
                     body
                 ),

@@ -21,10 +21,31 @@ lean_lib Conformance where
 -- adapter participates in named export.
 lean_lib PrismPMGeneratedFixture where
   roots := #[
+    `PrismPM.Foundation.Application,
     `PrismPM.Foundation.Arch,
+    `PrismPM.Foundation.Bytes,
+    `PrismPM.Foundation.Codec,
+    `PrismPM.Foundation.Core,
     `PrismPM.Foundation.Qual,
+    `PrismPM.Foundation.Result,
+    `PrismPM.Foundation.Runtime,
     `PrismPM.Foundation.Sec,
-    `PrismPM.Foundation.Holo
+    `PrismPM.Foundation.Utf8,
+    `PrismPM.Foundation.Holo,
+    `PrismPM.Foundation.Holo.V1.Archive,
+    `PrismPM.Foundation.Holo.V1.Capability,
+    `PrismPM.Foundation.Holo.V1.CoreWasm,
+    `PrismPM.Foundation.Holo.V1.Directory,
+    `PrismPM.Foundation.Holo.V1.Format,
+    `PrismPM.Foundation.Holo.V1.Identity,
+    `PrismPM.Foundation.Holo.V1.Manifest,
+    `PrismPM.Foundation.Holo.V1.PrismExtension,
+    `PrismPM.Foundation.Holo.V1.SourceManifest,
+    `PrismPM.Foundation.Holo.V1.View,
+    `PrismPM.Foundation.Integer,
+    `PrismPM.Foundation.View.V1.Interaction,
+    `PrismPM.Foundation.View.V1.Model,
+    `PrismPM.Foundation.View.V1.Projection
   ]
 
 -- Test-only Lean definitions and theorem proofs. This library is compiled by

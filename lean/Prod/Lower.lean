@@ -199,6 +199,70 @@ def natOpNames : List (Name × String) :=
 def opWhitelist (n : Name) : Option String :=
   (natOpNames.find? (fun p => p.1 == n)).map (·.2)
 
+/-- LexLean's semantic backend emits these generic runtime calls from closed
+    semantic primitive nodes.  They are compiler boundary operations, not
+    application helpers: named-closure discovery leaves their implementation
+    bodies out of LCNF and this table lowers the call itself to typed IR. -/
+def isLexLeanRuntimeName (n : Name) : Bool :=
+  (n.toString.splitOn ".").contains "LexLeanRuntime"
+
+def lexLeanPrimitive? (n : Name) : Option (String × Nat) :=
+  if !isLexLeanRuntimeName n then none else
+  match lastComponent n with
+  | "subtract" => some ("sub", 2)
+  | "multiply" => some ("mul", 2)
+  | "quotient" => some ("quotient", 3)
+  | "remainder" => some ("remainder", 3)
+  | "negate" => some ("negate", 1)
+  | "checkedAdd" => some ("checked-add", 2)
+  | "checkedAddInt64" => some ("checked-add", 2)
+  | "checkedSubtract" => some ("checked-sub", 2)
+  | "checkedSubtractInt64" => some ("checked-sub", 2)
+  | "checkedMultiply" => some ("checked-mul", 2)
+  | "checkedMultiplyInt64" => some ("checked-mul", 2)
+  | "checkedNegate" => some ("checked-neg", 1)
+  | "checkedNegateInt64" => some ("checked-neg", 1)
+  | "checkedQuotient" => some ("checked-div", 2)
+  | "checkedQuotientInt64" => some ("checked-div", 2)
+  | "checkedConvert" => some ("checked-convert", 1)
+  | "bitAnd" => some ("bit-and", 2)
+  | "bitOr" => some ("bit-or", 2)
+  | "bitXor" => some ("bit-xor", 2)
+  | "bitNot" => some ("bit-not", 1)
+  | "shiftLeft" => some ("checked-shl", 2)
+  | "shiftRight" => some ("checked-shr", 2)
+  | "equal" => some ("eq", 2)
+  | "append" => some ("append", 2)
+  | "length" => some ("length", 1)
+  | "index" => some ("index", 2)
+  | "slice" => some ("slice", 3)
+  | "utf8Encode" => some ("utf8-encode", 1)
+  | "utf8Decode" => some ("utf8-decode", 1)
+  | "compareBytes" => some ("compare-bytes", 2)
+  | "splitExact" => some ("split-exact", 3)
+  | "join" => some ("join", 2)
+  | "parseDecimal" => some ("parse-decimal", 1)
+  | "formatDecimal" => some ("format-decimal", 1)
+  | _ => none
+
+/-- Lean's closed scalar/container heads that have direct prod-IR type nodes
+    and therefore must never be re-exported as application inductives. -/
+def isPortableBuiltinTypeName (n : Name) : Bool :=
+  [``Nat, ``Bool, ``Int, ``Int8, ``Int16, ``Int32, ``Int64,
+   ``UInt8, ``UInt16, ``UInt32, ``UInt64, ``String, ``ByteArray,
+   ``Ordering, ``Prod, ``List, ``Option, ``Except].contains n
+
+def isErasedPortableDictionary (n : Name) : Bool :=
+  let part := lastComponent n
+  part.startsWith "instBEq" || part.startsWith "instDecidableEq" ||
+    part.startsWith "instToString" || n == ``Int.instSub || n == ``Int.instMul ||
+    toString n == "Int.instNeg"
+
+private def isFixedLiteralConstructor (n : Name) : Bool :=
+  let owner := n.getPrefix
+  (lastComponent n == "ofNat" || lastComponent n == "ofInt") &&
+    [``Int8, ``Int16, ``Int32, ``Int64, ``UInt8, ``UInt16, ``UInt32, ``UInt64].contains owner
+
 private def isCtorName (env : Environment) (n : Name) : Bool :=
   match env.find? n with
   | some (.ctorInfo _) => true
@@ -207,7 +271,12 @@ private def isCtorName (env : Environment) (n : Name) : Bool :=
 def lowerLetValue (v : LetValue .pure) : LowerM String := do
   match v with
   | .lit (.nat n) => return toString n
-  | .lit _ => opaqueNode "literal"
+  | .lit (.uint8 n) => return toString n
+  | .lit (.uint16 n) => return toString n
+  | .lit (.uint32 n) => return toString n
+  | .lit (.uint64 n) => return toString n
+  | .lit (.usize n) => return toString n
+  | .lit (.str value) => return s!"(string \"{Lean.Json.escape value}\")"
   | .erased => opaqueNode "erased"
   | .proj typeName idx struct => do
     let s ← lookupFVar struct
@@ -230,6 +299,28 @@ def lowerLetValue (v : LetValue .pure) : LowerM String := do
   | .const declName _ args => do
     let env ← getEnv
     let args' ← lowerArgs args
+    if let some (op, arity) := lexLeanPrimitive? declName then
+      if args'.size >= arity then
+        let values := args'.extract (args'.size - arity) args'.size
+        modify fun st => { st with dropped := st.dropped + (args'.size - arity) }
+        return s!"({op}{spaced values})"
+      modify fun st => { st with externs := st.externs.push s!"{declName} (wrong semantic primitive arity)" }
+      return s!"(extern \"{declName}\"{spaced args'})"
+    if isLexLeanRuntimeName declName then
+      -- Typeclass dictionaries and helper records are implementation inputs
+      -- to a following primitive call. Their semantic effect is captured by
+      -- the primitive opcode and fixed operand/result types, so the target IR
+      -- deliberately erases the dictionary value.
+      modify fun st => { st with dropped := st.dropped + 1 }
+      return "0"
+    if isErasedPortableDictionary declName then
+      modify fun st => { st with dropped := st.dropped + 1 }
+      return "0"
+    if lastComponent declName == "neg" &&
+        [``Int8, ``Int16, ``Int32, ``Int64].contains declName.getPrefix && args'.size == 1 then
+      return s!"(negate {args'[0]!})"
+    if isFixedLiteralConstructor declName && args'.size == 1 then
+      return args'[0]!
     if isCtorName env declName then
       return s!"(ctor \"{declName}\"{spaced args'})"
     match opWhitelist declName with
@@ -389,6 +480,17 @@ partial def lowerType (e : Expr) : LowerM String := do
   | .const ``Nat _ => return "Nat"
   | .const ``Bool _ => return "Bool"
   | .const ``Int _ => return "Int"
+  | .const ``Int8 _ => return "Int8"
+  | .const ``Int16 _ => return "Int16"
+  | .const ``Int32 _ => return "Int32"
+  | .const ``Int64 _ => return "Int64"
+  | .const ``UInt8 _ => return "UInt8"
+  | .const ``UInt16 _ => return "UInt16"
+  | .const ``UInt32 _ => return "UInt32"
+  | .const ``UInt64 _ => return "UInt64"
+  | .const ``String _ => return "String"
+  | .const ``ByteArray _ => return "Bytes"
+  | .const ``Ordering _ => return "Ordering"
   | .const n _ =>
     match (← getEnv).find? n with
     | some (.inductInfo _) => return s!"(named \"{n}\")"
@@ -399,6 +501,8 @@ partial def lowerType (e : Expr) : LowerM String := do
     return s!"(List {← lowerType a})"
   | .app (.const ``Option _) a =>
     return s!"(Option {← lowerType a})"
+  | .app (.app (.const ``Except _) error) ok =>
+    return s!"(Result {← lowerType ok} {← lowerType error})"
   | _ =>
     match e.getAppFn with
     | .const n _ =>

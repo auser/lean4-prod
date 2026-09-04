@@ -56,14 +56,16 @@ lowerer accepts. -/
 def subsetJson : String :=
   let ops := natOpNames.map fun p => toString p.1
   let deciders := deciderNames.map fun p => toString p.1
-  -- `Nat`/`Bool`/`Int`/`Prod`/`List`/`Option` are built into the IR type
+  -- Portable scalar/container types are built into the IR type
   -- grammar (`lowerType`); anything else is a user inductive, and
   -- `lowerTypeDecl` supports exactly parameterless, non-recursive,
   -- single-block inductives with a single constructor (`Prop` fields
   -- erased) — the only shape the conformance suite exercises
   -- (`Conformance.MidProp`, `Conformance.NoProp`, `UorAtlas.Instance`).
-  let types := ["Nat", "Bool", "Int (renders as i64; no Int operators are whitelisted, so Int arithmetic is rejected as UnresolvedCall)",
-                "Prod", "List", "Option",
+  let types := ["Nat (bounded u64 target policy)", "Bool",
+                "Int (mathematical; target closure rejected as UnboundedInt)",
+                "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+                "String", "ByteArray", "Ordering", "Prod", "List", "Option", "Except",
                 "parameterless, non-recursive, single-constructor structures (Prop fields erased)"]
   let quoted (xs : List String) : String :=
     String.intercalate ", " (xs.map fun s => "\"" ++ jsonEscape s ++ "\"")

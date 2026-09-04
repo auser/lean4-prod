@@ -35,7 +35,10 @@ RUN curl -sSfL https://github.com/casey/just/releases/download/1.57.0/just-1.57.
     && rm /tmp/just.tar.gz \
     && chmod +x /usr/local/bin/just
 
-RUN cargo install --locked --version 0.13.1 wasm-pack
+RUN cargo install --locked --version 0.13.1 wasm-pack \
+    && cargo install --locked --version 0.2.122 wasm-bindgen-cli \
+    && cargo install --locked --version 1.258.0 wasm-tools \
+    && cargo install --locked --version 48.0.1 wasmtime-cli
 
 # The bind mount is owned by the host developer, while this deliberately
 # minimal container runs as root. Trust only the fixed VS Code workspace path.

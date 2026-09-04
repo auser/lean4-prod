@@ -172,7 +172,8 @@ prod_macros::prod_defs! { ir = "kernel.ir" }   // typed, zero-cost Rust fns
 
 The CLI can generate both sides of a small, explicit C ABI: a header for C
 callers and Rust `extern "C"` wrappers that invoke the generated definitions.
-The first ABI supports scalar `Nat` (`uint64_t`), `Int` (`int64_t`), and
+The first ABI supports scalar `Nat` (`uint64_t`), fixed-width `Int64`
+(`int64_t`), and
 `Bool` (`uint8_t`, where zero is false). A checked Lean definition returns a
 `*_result_t` with a `status` code and `value`; status zero means success.
 
