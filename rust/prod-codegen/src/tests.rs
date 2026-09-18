@@ -441,7 +441,7 @@ fn test_generate_class_index() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct Instance {\n    pub q: u64,\n    pub T: u64,\n    pub O: u64,\n}\n\npub fn classIndex(h2: u64, d: u64, l: u64, inst: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok(((((stride(inst)) as u64).checked_mul(h2).ok_or(crate::ComputeError::MulOverflow)?) as u64).checked_add((((((inst).O) as u64).checked_mul(d).ok_or(crate::ComputeError::MulOverflow)?) as u64).checked_add(l).ok_or(crate::ComputeError::AddOverflow)?).ok_or(crate::ComputeError::AddOverflow)?)\n}\n\npub fn belt(inst: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok(((class_count(inst)) as u64).checked_mul(((1) as u64).checked_shl(u32::try_from((((inst).O) as u64).saturating_sub(1)).map_err(|_| crate::ComputeError::ShiftExponentTooLarge)?).ok_or(crate::ComputeError::ShiftOverflow)?).ok_or(crate::ComputeError::MulOverflow)?)\n}\n\n"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct Instance {\n    pub q: u64,\n    pub T: u64,\n    pub O: u64,\n}\n\npub fn classIndex(h2: u64, d: u64, l: u64, inst: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok(u64::checked_add(u64::checked_mul(stride(inst), h2).ok_or(crate::ComputeError::MulOverflow)?, u64::checked_add(u64::checked_mul((inst).O, d).ok_or(crate::ComputeError::MulOverflow)?, l).ok_or(crate::ComputeError::AddOverflow)?).ok_or(crate::ComputeError::AddOverflow)?)\n}\n\npub fn belt(inst: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok(u64::checked_mul(class_count(inst), u64::checked_shl(1, u32::try_from(core::convert::identity::<u64>(u64::saturating_sub((inst).O, 1))).map_err(|_| crate::ComputeError::ShiftExponentTooLarge)?).ok_or(crate::ComputeError::ShiftOverflow)?).ok_or(crate::ComputeError::MulOverflow)?)\n}\n\n"
     );
 }
 
@@ -481,7 +481,7 @@ fn test_generate_list_param_is_a_slice_and_return_is_a_buffer() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "pub fn digitSum(xs: &[u64]) -> Result<u64, crate::ComputeError> {\n    Ok(match xs {\n        [] => 0,\n        [h, t @ ..] => { let h = h.clone(); ((h) as u64).checked_add(digitSum(&(t))?).ok_or(crate::ComputeError::AddOverflow)? },\n    })\n}\n\npub fn digits(n: u64, output: &mut [u64]) -> Result<usize, crate::ComputeError> {\n    if (n < 8) { match (output).split_first_mut() { None => Err(crate::ComputeError::OutputTooSmall), Some((__head0, __rest0)) => { *__head0 = n; let __len0 = Ok::<usize, crate::ComputeError>(0)?; Ok(__len0 + 1) } } } else { match (output).split_first_mut() { None => Err(crate::ComputeError::OutputTooSmall), Some((__head0, __rest0)) => { *__head0 = if (8) == 0 { 0 } else { (n) % (8) }; let __len0 = digits(if (8) == 0 { 0 } else { (n) / (8) }, __rest0)?; Ok(__len0 + 1) } } }\n}\n\n"
+        "pub fn digitSum(xs: &[u64]) -> Result<u64, crate::ComputeError> {\n    Ok(match xs {\n        [] => 0,\n        [h, t @ ..] => { let h = h.clone(); u64::checked_add(h, digitSum(&(t))?).ok_or(crate::ComputeError::AddOverflow)? },\n    })\n}\n\npub fn digits(n: u64, output: &mut [u64]) -> Result<usize, crate::ComputeError> {\n    if (n < 8) { match (output).split_first_mut() { None => Err(crate::ComputeError::OutputTooSmall), Some((__head0, __rest0)) => { *__head0 = n; let __len0 = Ok::<usize, crate::ComputeError>(0)?; Ok(__len0 + 1) } } } else { match (output).split_first_mut() { None => Err(crate::ComputeError::OutputTooSmall), Some((__head0, __rest0)) => { *__head0 = if (8) == 0 { 0 } else { (n) % (8) }; let __len0 = digits(if (8) == 0 { 0 } else { (n) / (8) }, __rest0)?; Ok(__len0 + 1) } } }\n}\n\n"
     );
 }
 
@@ -555,7 +555,7 @@ fn test_fallibility_is_precise_not_uniform() {
     assert!(out.contains("Ok(risky(x)?)"));
     // A recursive definition reaches its own fixpoint.
     assert!(out.contains("pub fn loops(fuel: u64, x: u64) -> Result<u64, crate::ComputeError> {"));
-    assert!(out.contains("loops(k, ((x) as u64).checked_add(1)"));
+    assert!(out.contains("loops(k, u64::checked_add(x, 1)"));
 }
 
 #[test]
@@ -717,7 +717,7 @@ fn test_generate_nat_cases_recursion() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "pub fn digitCount(fuel: u64, n: u64) -> Result<u64, crate::ComputeError> {\n    Ok(match fuel {\n        0 => 0,\n        _ => { let k = (fuel).saturating_sub(1); if (n < 8) { 1 } else { ((1) as u64).checked_add(digitCount(k, if (8) == 0 { 0 } else { (n) / (8) })?).ok_or(crate::ComputeError::AddOverflow)? } },\n    })\n}\n\n"
+        "pub fn digitCount(fuel: u64, n: u64) -> Result<u64, crate::ComputeError> {\n    Ok(match fuel {\n        0 => 0,\n        _ => { let k = (fuel).saturating_sub(1); if (n < 8) { 1 } else { u64::checked_add(1, digitCount(k, if (8) == 0 { 0 } else { (n) / (8) })?).ok_or(crate::ComputeError::AddOverflow)? } },\n    })\n}\n\n"
     );
 }
 
@@ -790,7 +790,7 @@ fn test_generate_kernel_ir_shapes() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct Instance {\n    pub q: u64,\n    pub T: u64,\n    pub O: u64,\n}\n\npub fn stride(i: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok({ let _x_4 = (i).T; { let _x_5 = (i).O; { let _x_13 = ((_x_4) as u64).checked_mul(_x_5).ok_or(crate::ComputeError::MulOverflow)?; _x_13 } } })\n}\n\npub fn classDecode(idx: u64, i: crate::Instance) -> Result<(u64, (u64, u64)), crate::ComputeError> {\n    Ok({ let _x_4 = stride(i)?; { let h2 = if (_x_4) == 0 { 0 } else { (idx) / (_x_4) }; { let rem = if (_x_4) == 0 { 0 } else { (idx) % (_x_4) }; { let _x_10 = (i).O; { let d = if (_x_10) == 0 { 0 } else { (rem) / (_x_10) }; { let l = if (_x_10) == 0 { 0 } else { (rem) % (_x_10) }; { let _x_13 = (d, l); { let _x_14 = (h2, _x_13); _x_14 } } } } } } } })\n}\n\n"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct Instance {\n    pub q: u64,\n    pub T: u64,\n    pub O: u64,\n}\n\npub fn stride(i: crate::Instance) -> Result<u64, crate::ComputeError> {\n    Ok({ let _x_4 = (i).T; { let _x_5 = (i).O; { let _x_13 = u64::checked_mul(_x_4, _x_5).ok_or(crate::ComputeError::MulOverflow)?; _x_13 } } })\n}\n\npub fn classDecode(idx: u64, i: crate::Instance) -> Result<(u64, (u64, u64)), crate::ComputeError> {\n    Ok({ let _x_4 = stride(i)?; { let h2 = if (_x_4) == 0 { 0 } else { (idx) / (_x_4) }; { let rem = if (_x_4) == 0 { 0 } else { (idx) % (_x_4) }; { let _x_10 = (i).O; { let d = if (_x_10) == 0 { 0 } else { (rem) / (_x_10) }; { let l = if (_x_10) == 0 { 0 } else { (rem) % (_x_10) }; { let _x_13 = (d, l); { let _x_14 = (h2, _x_13); _x_14 } } } } } } } })\n}\n\n"
     );
 }
 
@@ -975,7 +975,7 @@ fn test_generate_jp_jmp_inlined() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "pub fn f(x: u64) -> Result<u64, crate::ComputeError> {\n    Ok({ let g = /* jp \"g\" inlined at its jump site */ (); { let a = x; ((a) as u64).checked_add(1).ok_or(crate::ComputeError::AddOverflow)? } })\n}\n\n"
+        "pub fn f(x: u64) -> Result<u64, crate::ComputeError> {\n    Ok({ let g = /* jp \"g\" inlined at its jump site */ (); { let a = x; u64::checked_add(a, 1).ok_or(crate::ComputeError::AddOverflow)? } })\n}\n\n"
     );
 }
 
@@ -1011,7 +1011,7 @@ fn test_multi_caller_acyclic_join_point_is_inlined_at_every_jump() {
 "#;
     let out = generate(ir);
     assert_eq!(out.matches("let a =").count(), 2);
-    assert_eq!(out.matches("checked_add(1)").count(), 2);
+    assert_eq!(out.matches("u64::checked_add(a, 1)").count(), 2);
     assert!(out.contains("let a = x"));
     assert!(out.contains("let a = c"));
 }
@@ -1040,7 +1040,7 @@ fn test_generate_pow() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "pub fn belt(i: u64) -> Result<u64, crate::ComputeError> {\n    Ok(((2) as u64).checked_pow(u32::try_from(((i) as u64).saturating_sub(1)).map_err(|_| crate::ComputeError::PowExponentTooLarge)?).ok_or(crate::ComputeError::PowOverflow)?)\n}\n\n"
+        "pub fn belt(i: u64) -> Result<u64, crate::ComputeError> {\n    Ok(u64::checked_pow(2, u32::try_from(core::convert::identity::<u64>(u64::saturating_sub(i, 1))).map_err(|_| crate::ComputeError::PowExponentTooLarge)?).ok_or(crate::ComputeError::PowOverflow)?)\n}\n\n"
     );
 }
 
@@ -1058,7 +1058,7 @@ fn test_generate_shr() {
     let out = generate(ir);
     assert_eq!(
         out,
-        "pub fn half(n: u64, k: u64) -> u64 {\n    ((n) as u64).checked_shr(u32::try_from(k).unwrap_or(u32::MAX)).unwrap_or(0)\n}\n\n"
+        "pub fn half(n: u64, k: u64) -> u64 {\n    u64::checked_shr(n, u32::try_from(core::convert::identity::<u64>(k)).unwrap_or(u32::MAX)).unwrap_or(0)\n}\n\n"
     );
 }
 
@@ -1094,12 +1094,12 @@ fn test_generate_nat_arithmetic_policy_never_panics() {
 )
 "#;
     let out = generate(ir);
-    assert!(out.contains("checked_add(y).ok_or(crate::ComputeError::AddOverflow)?"));
-    assert!(out.contains("saturating_sub(y)"));
+    assert!(out.contains("u64::checked_add(x, y).ok_or(crate::ComputeError::AddOverflow)?"));
+    assert!(out.contains("u64::saturating_sub(x, y)"));
     assert!(out.contains("if (y) == 0 { 0 } else { (x) / (y) }"));
     assert!(out.contains("if (y) == 0 { 0 } else { (x) % (y) }"));
-    assert!(out.contains("checked_shl(u32::try_from(y).map_err(|_| crate::ComputeError::ShiftExponentTooLarge)?).ok_or(crate::ComputeError::ShiftOverflow)?"));
-    assert!(out.contains("checked_pow(u32::try_from(y).map_err(|_| crate::ComputeError::PowExponentTooLarge)?).ok_or(crate::ComputeError::PowOverflow)?"));
+    assert!(out.contains("u64::checked_shl(x, u32::try_from(core::convert::identity::<u64>(y)).map_err(|_| crate::ComputeError::ShiftExponentTooLarge)?).ok_or(crate::ComputeError::ShiftOverflow)?"));
+    assert!(out.contains("u64::checked_pow(x, u32::try_from(core::convert::identity::<u64>(y)).map_err(|_| crate::ComputeError::PowExponentTooLarge)?).ok_or(crate::ComputeError::PowOverflow)?"));
     // The whole point: no panicking exit remains in the arithmetic lowering.
     assert!(!out.contains(".expect("));
     assert!(!out.contains(".unwrap("));
