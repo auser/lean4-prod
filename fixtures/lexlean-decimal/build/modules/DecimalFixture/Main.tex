@@ -1,0 +1,106 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\begin{document}
+\section*{Semantic declarations}
+\subsection*{\texttt{parseInt}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (Int)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (Int))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseInt8}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (Int8)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (Int8))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseInt16}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (Int16)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (Int16))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseInt32}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (Int32)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (Int32))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseInt64}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (Int64)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (Int64))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseUint8}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (UInt8)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (UInt8))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseUint16}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (UInt16)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (UInt16))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseUint32}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (UInt32)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (UInt32))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{parseUint64}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (UInt64)}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.parseDecimal (value) : Option (UInt64))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{acceptUInt8}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Bool}.\par
+\noindent Definition: \texttt{(match (LexLeanRuntime.parseDecimal (value) : Option (UInt8)) with | Option.none => false | Option.some \_ => true)}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{nonzeroUInt16}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Bool}.\par
+\noindent Definition: \texttt{(match (LexLeanRuntime.parseDecimal (value) : Option (UInt16)) with | Option.none => false | Option.some parsed => (if (LexLeanRuntime.equal (parsed) ((0 : UInt16)) : Bool) then false else true))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{boolByte}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{ByteArray}.\par
+\noindent Definition: \texttt{(match value with | Bool.false => ByteArray.mk \#[0] | Bool.true => ByteArray.mk \#[1])}.\par
+\noindent Axiom policy: \texttt{none}.\par
+\subsection*{\texttt{entry}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{ByteArray}.\par
+\noindent Definition: \texttt{(match (LexLeanRuntime.utf8Decode (input) : Option (String)) with | Option.none => ByteArray.mk \#[255] | Option.some parsed => (match (LexLeanRuntime.parseDecimal (parsed) : Option (UInt8)) with | Option.none => (LexLeanRuntime.append (ByteArray.mk \#[0]) (boolByte (nonzeroUInt16 (parsed))) : ByteArray) | Option.some \_ => (LexLeanRuntime.append (ByteArray.mk \#[1]) (boolByte (nonzeroUInt16 (parsed))) : ByteArray)))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{acceptInt}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Bool}.\par
+\noindent Definition: \texttt{(match (LexLeanRuntime.parseDecimal (value) : Option (Int)) with | Option.none => false | Option.some \_ => true)}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{splitMaximum}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (List (String))}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.splitExact (value) (delimiter) ((4294967295 : UInt32)) : Option (List (String)))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{splitZero}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (List (String))}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.splitExact (value) (delimiter) ((0 : UInt32)) : Option (List (String)))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{splitOne}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (List (String))}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.splitExact (value) (delimiter) ((1 : UInt32)) : Option (List (String)))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{splitBounded}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Option (List (String))}.\par
+\noindent Definition: \texttt{(LexLeanRuntime.splitExact (value) (delimiter) (maximum) : Option (List (String)))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\subsection*{\texttt{splitAccepted}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{Bool}.\par
+\noindent Definition: \texttt{(match value with | Option.none => false | Option.some \_ => true)}.\par
+\noindent Axiom policy: \texttt{none}.\par
+\subsection*{\texttt{splitEntry}}
+\noindent Kind: \texttt{definition}.\par
+\noindent Type: \texttt{ByteArray}.\par
+\noindent Definition: \texttt{(match (LexLeanRuntime.utf8Decode (input) : Option (String)) with | Option.none => ByteArray.mk \#[255] | Option.some text => (LexLeanRuntime.append ((LexLeanRuntime.append ((LexLeanRuntime.append (boolByte (splitAccepted (splitMaximum (text) ("|")))) (boolByte (splitAccepted (splitZero (text) ("|")))) : ByteArray)) (boolByte (splitAccepted (splitOne (text) ("|")))) : ByteArray)) (boolByte (splitAccepted (splitBounded (text) ("|") ((2 : UInt32))))) : ByteArray))}.\par
+\noindent Axiom policy: \texttt{exact [Classical.choice, Quot.sound, propext]}.\par
+\end{document}

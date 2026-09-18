@@ -271,6 +271,17 @@ private def isFixedLiteralConstructor (n : Name) : Bool :=
   (lastComponent n == "ofNat" || lastComponent n == "ofInt") &&
     [``Int8, ``Int16, ``Int32, ``Int64, ``UInt8, ``UInt16, ``UInt32, ``UInt64].contains owner
 
+/-- Decimal parsing must retain its exact Option payload even when its caller
+    discards that payload or only compares it with an untyped literal. -/
+private def decimalTarget? : Expr → Option String
+  | .app (.const ``Option _) (.const target _) =>
+    let integers : List (Name × String) :=
+      [(``Int, "Int"), (``Int8, "Int8"), (``Int16, "Int16"),
+       (``Int32, "Int32"), (``Int64, "Int64"), (``UInt8, "UInt8"),
+       (``UInt16, "UInt16"), (``UInt32, "UInt32"), (``UInt64, "UInt64")]
+    (integers.find? (fun row => row.1 == target)).map (·.2)
+  | _ => none
+
 private def isCtorName (env : Environment) (n : Name) : Bool :=
   match env.find? n with
   | some (.ctorInfo _) => true
@@ -392,6 +403,11 @@ def lowerLetValue (v : LetValue .pure) (resultType : Option Expr := none) : Lowe
       if args'.size >= arity then
         let values := args'.extract (args'.size - arity) args'.size
         modify fun st => { st with dropped := st.dropped + (args'.size - arity) }
+        if op == "parse-decimal" then
+          if let some target := resultType.bind decimalTarget? then
+            return s!"(parse-decimal-as {target}{spaced values})"
+          modify fun st => { st with externs := st.externs.push s!"{declName} (unsupported semantic decimal result type)" }
+          return s!"(extern \"{declName}\"{spaced args'})"
         return s!"({op}{spaced values})"
       modify fun st => { st with externs := st.externs.push s!"{declName} (wrong semantic primitive arity)" }
       return s!"(extern \"{declName}\"{spaced args'})"

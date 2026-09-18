@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use prod_ir::{Module, Type};
 
-use crate::{generate_module, Error, GeneratedPackage, PackageFile};
+use crate::{generate_module, signatures, Error, GeneratedPackage, PackageFile, Shape};
 
 /// Closed generic ABI parameters. Application behavior remains in `entry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +52,7 @@ fn valid_crate(value: &str) -> bool {
 /// selected function must have either the allocation-free byte-list signature
 /// that prod-codegen renders as `(&[u8], &mut [u8]) -> Result<usize, _>`, or
 /// the owned `Bytes -> Bytes` signature used by typed UTF-8 codecs.
+/// Checked computation failures trap at the ABI boundary, for either shape.
 pub fn generate_core_wasm_package(
     module: &Module,
     spec: &CoreWasmSpec,
@@ -114,8 +115,17 @@ pub fn generate_core_wasm_package(
             entry = spec.entry,
         )
     } else {
+        // Use the same whole-module fixpoint as Rust generation: a Bytes
+        // entry may fail through a transitive callee, while unrelated checked
+        // operations must not change an infallible entry's calling convention.
+        let result_adapter =
+            if signatures(&module.definitions).get(spec.entry.as_str()) == Some(&Shape::Fallible) {
+                ".unwrap_or_else(|_| trap())"
+            } else {
+                ""
+            };
         format!(
-            "let generated_output = {entry}(input.to_vec());\n    if generated_output.len() > OUTPUT_CAP as usize {{ trap(); }}\n    let output_len = generated_output.len();\n    let output_ptr = allocate(u32::try_from(output_len).unwrap_or_else(|_| trap()), 8);\n    let output_end = output_ptr.checked_add(u32::try_from(output_len).unwrap_or_else(|_| trap())).unwrap_or_else(|| trap());\n    if input_ptr < output_end && output_ptr < input_end {{ trap(); }}\n    unsafe {{ core::ptr::copy_nonoverlapping(generated_output.as_ptr(), output_ptr as *mut u8, output_len); }}",
+            "let generated_output = {entry}(input.to_vec()){result_adapter};\n    if generated_output.len() > OUTPUT_CAP as usize {{ trap(); }}\n    let output_len = generated_output.len();\n    let output_ptr = allocate(u32::try_from(output_len).unwrap_or_else(|_| trap()), 8);\n    let output_end = output_ptr.checked_add(u32::try_from(output_len).unwrap_or_else(|_| trap())).unwrap_or_else(|| trap());\n    if input_ptr < output_end && output_ptr < input_end {{ trap(); }}\n    unsafe {{ core::ptr::copy_nonoverlapping(generated_output.as_ptr(), output_ptr as *mut u8, output_len); }}",
             entry = spec.entry,
         )
     };
