@@ -27,7 +27,7 @@ pub struct SdkBindings {
 }
 
 fn result_name(spec: &FunctionSpec) -> String {
-    format!("ProdFfi_{}_Result", spec.c_name)
+    super::c_abi::result_name(&spec.c_name)
 }
 
 fn rust_return(spec: &FunctionSpec) -> String {

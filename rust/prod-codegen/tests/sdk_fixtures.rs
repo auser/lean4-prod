@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "sdk_fixtures/hygiene.rs"]
+mod hygiene;
+
 struct FixtureDir {
     path: PathBuf,
 }

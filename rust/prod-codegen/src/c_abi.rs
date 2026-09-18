@@ -5,7 +5,7 @@
 //! emits the C declaration and a matching `extern "C"` adapter. Unsupported
 //! shapes are omitted from the artifact with an explanatory header comment.
 
-use super::{last_component, rust_ident, signatures, Shape};
+use super::{last_component, rust_ident, signatures, Shape, RUST_KEYWORDS};
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -31,6 +31,238 @@ pub(crate) struct FunctionSpec {
     pub(crate) ret: Scalar,
     pub(crate) shape: Shape,
     pub(crate) c_name: String,
+}
+
+pub(crate) fn result_name(c_name: &str) -> String {
+    format!("ProdFfi_{}_Result", c_name)
+}
+
+// These are binding-position keywords, not all contextual language words:
+// ordinary names such as `value`, `field`, `get`, and `set` remain unchanged.
+const FOREIGN_KEYWORDS: &[&str] = &[
+    // C (including the standard spellings of C11/C23 keywords).
+    "alignas",
+    "alignof",
+    "auto",
+    "bool",
+    "char",
+    "constexpr",
+    "default",
+    "double",
+    "float",
+    "goto",
+    "int",
+    "long",
+    "nullptr",
+    "register",
+    "restrict",
+    "short",
+    "signed",
+    "sizeof",
+    "static_assert",
+    "switch",
+    "thread_local",
+    "typedef",
+    "typeof_unqual",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Bool",
+    "_Complex",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
+    // Python, ECMAScript strict-mode bindings, and Kotlin hard keywords.
+    "False",
+    "None",
+    "True",
+    "and",
+    "assert",
+    "class",
+    "def",
+    "del",
+    "elif",
+    "except",
+    "finally",
+    "from",
+    "global",
+    "import",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "with",
+    "case",
+    "catch",
+    "debugger",
+    "delete",
+    "export",
+    "extends",
+    "function",
+    "implements",
+    "instanceof",
+    "interface",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "super",
+    "this",
+    "throw",
+    "var",
+    "eval",
+    "arguments",
+    "fun",
+    "object",
+    "typealias",
+    "val",
+    "when",
+];
+
+fn portable_parameter(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let valid_start = bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
+    valid_start
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && name != "_"
+        && name != "Self"
+        && !name.starts_with("__")
+        && !name
+            .as_bytes()
+            .get(1)
+            .is_some_and(|b| name.starts_with('_') && b.is_ascii_uppercase())
+        && !RUST_KEYWORDS.contains(&name)
+        && !FOREIGN_KEYWORDS.contains(&name)
+}
+
+fn stdint_macro(name: &str) -> bool {
+    // <stdint.h> object-like macros expand even in a parameter declaration.
+    let Some(prefix) = name
+        .strip_suffix("_MIN")
+        .or_else(|| name.strip_suffix("_MAX"))
+    else {
+        return false;
+    };
+    if [
+        "INTPTR",
+        "UINTPTR",
+        "INTMAX",
+        "UINTMAX",
+        "PTRDIFF",
+        "SIG_ATOMIC",
+        "SIZE",
+        "WCHAR",
+        "WINT",
+    ]
+    .contains(&prefix)
+    {
+        return true;
+    }
+    [
+        "INT",
+        "UINT",
+        "INT_LEAST",
+        "UINT_LEAST",
+        "INT_FAST",
+        "UINT_FAST",
+    ]
+    .iter()
+    .any(|start| {
+        prefix
+            .strip_prefix(start)
+            .is_some_and(|width| ["8", "16", "32", "64"].contains(&width))
+    })
+}
+
+/// One positional mapping feeds every scalar adapter. It never changes the
+/// implementation's binders, argument order, scalar types, or exported symbols.
+fn wrapper_parameters(
+    def: &Definition,
+    scalars: &[Scalar],
+    shape: Shape,
+    ret: Scalar,
+    c_name: &str,
+) -> Result<Vec<(String, Scalar)>, CAbiError> {
+    let mut original = BTreeSet::new();
+    for (name, _) in &def.params {
+        if !original.insert(name.as_str()) {
+            return Err(CAbiError::UnsupportedDefinition {
+                definition: def.name.clone(),
+                reason: format!("simultaneous parameters repeat `{name}`"),
+            });
+        }
+    }
+    let mut protected: BTreeSet<String> = [
+        "Some", "None", "Ok", "Err", "lib", "fn", "ctypes", "native", "raw",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    protected.insert(String::from(last_component(&def.name)));
+    protected.insert(String::from(c_name));
+    if is_bool(ret) {
+        protected.extend([String::from("bool"), String::from("Number")]);
+    } else {
+        protected.insert(String::from("BigInt"));
+    }
+    if shape == Shape::Fallible {
+        protected.extend(
+            [
+                "RuntimeError",
+                "PROD_STATUS_OK",
+                "Error",
+                "Result",
+                "IllegalStateException",
+                "__prod_compute_error",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+        protected.insert(result_name(c_name));
+    }
+    let mut next = 0;
+    let mut used = BTreeSet::new();
+    let mut params = Vec::new();
+    for (index, ((name, _), scalar)) in def.params.iter().zip(scalars).enumerate() {
+        // A C prototype parameter can hide a typedef used by a later parameter.
+        let hides_c_type = scalars[index + 1..]
+            .iter()
+            .any(|later| name == later.c_type());
+        let chosen = if portable_parameter(name)
+            && !stdint_macro(name)
+            && !protected.contains(name)
+            && !hides_c_type
+        {
+            name.clone()
+        } else {
+            loop {
+                let candidate = format!("prod_arg_{next}");
+                next += 1;
+                if !original.contains(candidate.as_str())
+                    && !protected.contains(&candidate)
+                    && !used.contains(&candidate)
+                {
+                    break candidate;
+                }
+            }
+        };
+        used.insert(chosen.clone());
+        params.push((chosen, *scalar));
+    }
+    Ok(params)
 }
 
 pub(crate) fn rust_abi_type(scalar: Scalar) -> &'static str {
@@ -220,7 +452,14 @@ pub fn generate_c_bindings(module: &Module) -> Result<CBindings, CAbiError> {
         if !names.insert(name.clone()) {
             return Err(CAbiError::NameCollision { name });
         }
-        entries.push((def, shape, params, ret, name));
+        let params = wrapper_parameters(def, &params, shape, ret, &name)?;
+        entries.push(FunctionSpec {
+            definition: def.name.clone(),
+            params,
+            ret,
+            shape,
+            c_name: name,
+        });
     }
 
     if entries.is_empty() {
@@ -234,21 +473,7 @@ pub fn generate_c_bindings(module: &Module) -> Result<CBindings, CAbiError> {
         });
     }
 
-    let functions: Vec<FunctionSpec> = entries
-        .iter()
-        .map(|(def, shape, params, ret, name)| FunctionSpec {
-            definition: def.name.clone(),
-            params: def
-                .params
-                .iter()
-                .zip(params.iter())
-                .map(|((name, _), scalar)| (name.clone(), *scalar))
-                .collect(),
-            ret: *ret,
-            shape: *shape,
-            c_name: name.clone(),
-        })
-        .collect();
+    let functions = entries;
 
     let guard = header_guard(&module.name);
     let mut header = format!(
@@ -273,25 +498,26 @@ pub fn generate_c_bindings(module: &Module) -> Result<CBindings, CAbiError> {
 
     let mut rust =
         String::from("// Generated C ABI wrappers for Lean 4 definitions. Do not edit.\n\n");
-    for (def, shape, params, ret, name) in entries {
-        let rust_fn = rust_ident(last_component(&def.name));
-        let args: Vec<String> = def
-            .params
+    for spec in &functions {
+        let FunctionSpec {
+            definition,
+            params,
+            ret,
+            shape,
+            c_name: name,
+        } = spec;
+        let rust_fn = rust_ident(last_component(definition));
+        let args: Vec<String> = params
             .iter()
-            .zip(params.iter())
-            .map(|((param, _), scalar)| format!("{}: {}", param, scalar.rust_abi_type()))
+            .map(|(param, scalar)| format!("{}: {}", param, scalar.rust_abi_type()))
             .collect();
-        let c_args: Vec<String> = def
-            .params
+        let c_args: Vec<String> = params
             .iter()
-            .zip(params.iter())
-            .map(|((param, _), scalar)| format!("{} {}", scalar.c_type(), param))
+            .map(|(param, scalar)| format!("{} {}", scalar.c_type(), param))
             .collect();
-        let call_args: Vec<String> = def
-            .params
+        let call_args: Vec<String> = params
             .iter()
-            .zip(params.iter())
-            .map(|((param, _), scalar)| rust_arg(*scalar, param))
+            .map(|(param, scalar)| rust_arg(*scalar, param))
             .collect();
         let c_signature = if c_args.is_empty() {
             String::from("void")
@@ -312,11 +538,11 @@ pub fn generate_c_bindings(module: &Module) -> Result<CBindings, CAbiError> {
                     name,
                     args.join(", "),
                     ret.rust_abi_type(),
-                    c_value(ret, &call)
+                    c_value(*ret, &call)
                 ));
             }
             Shape::Fallible => {
-                let result_name = format!("ProdFfi_{}_Result", name);
+                let result_name = result_name(name);
                 let result_c_name = format!("{}_result_t", name);
                 header.push_str(&format!(
                     "typedef struct {} {{ prod_status_t status; {} value; }} {};\n",
@@ -334,7 +560,7 @@ pub fn generate_c_bindings(module: &Module) -> Result<CBindings, CAbiError> {
                     result_name,
                     call,
                     result_name,
-                    c_value(ret, "value"),
+                    c_value(*ret, "value"),
                     result_name,
                     status_match(),
                     ret.zero()
