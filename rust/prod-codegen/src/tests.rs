@@ -160,6 +160,55 @@ fn test_core_wasm_rejects_non_byte_dispatchers_and_invalid_bounds() {
     assert!(generate_core_wasm_package(&module, &invalid).is_err());
 }
 
+#[test]
+fn test_core_wasm_bytes_entry_uses_module_fallibility() {
+    let spec = CoreWasmSpec {
+        crate_name: "bytes-guest".to_string(),
+        entry: "entry".to_string(),
+        export_name: "holo_run".to_string(),
+        input_allocation_cap: 128,
+        output_allocation_cap: 64,
+        maximum_pages: 4,
+        input_ir_sha256: "11".repeat(32),
+    };
+    for (ir, fallible) in [
+        (
+            "(module Infallible (def entry ((input Bytes)) Bytes input)
+              (def unrelated () Nat (add 18446744073709551615 1)))",
+            false,
+        ),
+        (
+            "(module Direct (def entry ((input Bytes)) Bytes
+              (let checked (add 18446744073709551615 1) input)))",
+            true,
+        ),
+        (
+            "(module Transitive
+              (def entry ((input Bytes)) Bytes (call middle input))
+              (def middle ((input Bytes)) Bytes (call leaf input))
+              (def leaf ((input Bytes)) Bytes
+                (let checked (add 18446744073709551615 1) input)))",
+            true,
+        ),
+    ] {
+        let (_, module) = parse_module(ir).unwrap();
+        let package = generate_core_wasm_package(&module, &spec).unwrap();
+        let source = core::str::from_utf8(package_file(&package, "src/lib.rs")).unwrap();
+        let suffix = if fallible {
+            ".unwrap_or_else(|_| trap())"
+        } else {
+            ""
+        };
+        assert!(
+            source.contains(&format!(
+                "let generated_output = entry(input.to_vec()){suffix};"
+            )),
+            "wrong Bytes ABI adapter for {ir}"
+        );
+        assert_eq!(package, generate_core_wasm_package(&module, &spec).unwrap());
+    }
+}
+
 fn view_fixture() -> (EvaluatedViewV1, BrowserAdapterBinding) {
     (
         EvaluatedViewV1 {

@@ -1694,7 +1694,10 @@ impl<'m> Renderer<'_, 'm> {
                 self.value(count)?,
                 self.value(value)?
             )),
-            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.value(value)?)),
+            // Encoding consumes its String. Borrowed parameters and record
+            // fields must cross the existing owned boundary first; already
+            // owned Strings retain their allocation through `into_bytes`.
+            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.owned_value(value)?)),
             Expr::Utf8Decode(value) => Ok(format!(
                 "alloc::string::String::from_utf8({}).ok()",
                 self.value(value)?
