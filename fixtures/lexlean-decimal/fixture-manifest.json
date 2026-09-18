@@ -1,0 +1,12 @@
+{
+  "spec": "lean4-prod/lexlean-decimal-fixture/1",
+  "compiler_revision": "ee18ad907039a82ff5b11ff2117d6dfe95d80365",
+  "compiler_crate_sha256": "1b39ba47a7d013a79f5463fc49ab891ef4ca62402b05cb5a2059191bb3d4b8dd",
+  "compiler_semantics_id": "c56e1a234cee7c12f00e4f2f53d6094e2ed51f5bbf5195b60f79d4e8aa5bce53",
+  "build_manifest_sha256": "2527ac1ba1a5cbf5ada235e5968e53adb56d5dbfe4c8bebdb9cbadc0491148c5",
+  "build_id": "775d87e2af12cd2136564b9f7da230609aa1da02e9acbfda8a238670faad771e",
+  "source_id": "09654ac28d5d2b46a8822d4042ec640e7e4475ba3d0474b08ab6e31335acf598",
+  "semantic_id": "214d5bf57fe094eac75484e32a05a3515f326dc7fa528c82f408ccfc1231921b",
+  "generated_path": "lean/Conformance/LexLeanDecimal.lean",
+  "generated_sha256": "d73efe540c26b53fa9db2a4d9337e19acf26acd5a088910cb2b2786a6a0d52fc"
+}

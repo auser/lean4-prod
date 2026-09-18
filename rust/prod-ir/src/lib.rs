@@ -110,6 +110,9 @@ pub enum Expr {
     SplitExact(Box<Expr>, Box<Expr>, Box<Expr>),
     Join(Box<Expr>, Box<Expr>),
     ParseDecimal(Box<Expr>),
+    /// Exact integer target retained from the producer's Option result type.
+    /// The legacy untyped opcode remains available for existing IR consumers.
+    ParseDecimalAs(Type, Box<Expr>),
     FormatDecimal(Box<Expr>),
     Quotient(Box<Expr>, Box<Expr>, Box<Expr>),
     Remainder(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -219,6 +222,7 @@ impl Expr {
             | Expr::Utf8Encode(value)
             | Expr::Utf8Decode(value)
             | Expr::ParseDecimal(value)
+            | Expr::ParseDecimalAs(_, value)
             | Expr::FormatDecimal(value) => out.push(value),
             Expr::Negate(value) => out.push(value),
             Expr::If(c, t, f)
@@ -355,6 +359,7 @@ mod tests {
         "Opaque",
         "Param",
         "ParseDecimal",
+        "ParseDecimalAs",
         "Pow",
         "Proj",
         "Quotient",
@@ -405,6 +410,7 @@ mod tests {
             Expr::SplitExact(..) => "SplitExact",
             Expr::Join(..) => "Join",
             Expr::ParseDecimal(..) => "ParseDecimal",
+            Expr::ParseDecimalAs(..) => "ParseDecimalAs",
             Expr::FormatDecimal(..) => "FormatDecimal",
             Expr::Quotient(..) => "Quotient",
             Expr::Remainder(..) => "Remainder",
@@ -469,6 +475,7 @@ mod tests {
             (Expr::Utf8Encode(bx("a")), vec!["a"]),
             (Expr::Utf8Decode(bx("a")), vec!["a"]),
             (Expr::ParseDecimal(bx("a")), vec!["a"]),
+            (Expr::ParseDecimalAs(Type::UInt8, bx("a")), vec!["a"]),
             (Expr::FormatDecimal(bx("a")), vec!["a"]),
             (Expr::Negate(bx("a")), vec!["a"]),
             // Binary.

@@ -682,7 +682,10 @@ fn repeated_non_copy_locals(
                     nested.insert(name.clone());
                     // Projections of non-Copy fields are already borrows and
                     // may be reused without cloning the underlying value.
-                    if !matches!(value.as_ref(), Expr::Proj(..)) && count_var_uses(body, name) > 1 {
+                    if !matches!(value.as_ref(), Expr::Proj(..))
+                        && count_var_uses(body, name) > 1
+                        && !single_owned_option_match(name, value, body, definitions, table)
+                    {
                         output.insert(name.clone());
                     }
                 }
@@ -793,6 +796,28 @@ fn expression_is_borrowed(
     }
 }
 
+fn list_head_rebound_by_value(
+    scrutinee: &Expr,
+    params: &[(String, Type)],
+    table: &TypeTable<'_>,
+) -> bool {
+    // Known non-Copy parameter heads stay borrowed. Other heads retain the
+    // renderer's existing clone/rebind, including unknown nested/alias types;
+    // `true` means rebound, not a claim that an unknown element is Copy.
+    let Expr::Var(name) = scrutinee else {
+        return true;
+    };
+    params
+        .iter()
+        .find_map(|(parameter, ty)| {
+            (parameter == name).then_some(ty).and_then(|ty| match ty {
+                Type::List(element) => Some(copy_type(element, table, &mut BTreeSet::new())),
+                _ => None,
+            })
+        })
+        .unwrap_or(true)
+}
+
 fn borrowed_locals(
     definition: &Definition,
     definitions: &[Definition],
@@ -802,24 +827,34 @@ fn borrowed_locals(
         expr: &Expr,
         definitions: &[Definition],
         table: &TypeTable<'_>,
+        params: &[(String, Type)],
         locals: &mut BTreeSet<String>,
     ) {
         match expr {
             Expr::Let(name, value, body) => {
-                walk(value, definitions, table, locals);
+                walk(value, definitions, table, params, locals);
                 if expression_is_borrowed(value, definitions, table, locals) {
                     locals.insert(name.clone());
                 }
-                walk(body, definitions, table, locals);
+                walk(body, definitions, table, params, locals);
             }
             Expr::Match {
                 scrut,
                 alts,
                 default,
             } => {
-                walk(scrut, definitions, table, locals);
+                walk(scrut, definitions, table, params, locals);
                 let borrowed = expression_is_borrowed(scrut, definitions, table, locals);
                 for alt in alts {
+                    if alt.ctor == "List.cons" && alt.binders.len() == 2 {
+                        // Slice patterns always borrow their tail. Keep the
+                        // head classification identical to render_match's
+                        // optional by-value rebind, including nested matches.
+                        locals.insert(alt.binders[1].clone());
+                        if !list_head_rebound_by_value(scrut, params, table) {
+                            locals.insert(alt.binders[0].clone());
+                        }
+                    }
                     if borrowed {
                         if let Some(constructor) = table.values().find_map(|declaration| {
                             declaration.ctors.iter().find(|row| row.name == alt.ctor)
@@ -832,15 +867,15 @@ fn borrowed_locals(
                             }
                         }
                     }
-                    walk(&alt.body, definitions, table, locals);
+                    walk(&alt.body, definitions, table, params, locals);
                 }
                 if let Some(default) = default {
-                    walk(default, definitions, table, locals);
+                    walk(default, definitions, table, params, locals);
                 }
             }
             _ => {
                 for child in expr.children() {
-                    walk(child, definitions, table, locals);
+                    walk(child, definitions, table, params, locals);
                 }
             }
         }
@@ -852,8 +887,68 @@ fn borrowed_locals(
         .filter(|(_, ty)| internal_borrowed_parameter(ty, table, returns_copy))
         .map(|(name, _)| name.clone())
         .collect();
-    walk(&definition.body, definitions, table, &mut locals);
+    walk(
+        &definition.body,
+        definitions,
+        table,
+        &definition.params,
+        &mut locals,
+    );
     locals
+}
+
+/// Matching None does not move a payload, so that arm can return the original
+/// Option without cloning the Some payload. Keep the original typed expression
+/// intact: replacing the return with an untyped None can lose type inference.
+/// Any other use of the owner retains the existing conservative clone policy.
+fn single_owned_option_match(
+    name: &str,
+    value: &Expr,
+    body: &Expr,
+    definitions: &[Definition],
+    table: &TypeTable<'_>,
+) -> bool {
+    let Expr::Call(callee, _) = value else {
+        return false;
+    };
+    if !definitions.iter().any(|definition| {
+        definition.name == *callee
+            && matches!(definition.ret, Type::Option(_))
+            && !returns_borrowed_projection(&definition.body, &definition.ret, table)
+    }) {
+        return false;
+    }
+    let Expr::Match {
+        scrut,
+        alts,
+        default,
+    } = body
+    else {
+        return false;
+    };
+    if !matches!(scrut.as_ref(), Expr::Var(scrutinee) if scrutinee == name)
+        || default.is_some()
+        || alts.len() != 2
+        || !alts.iter().any(|alt| {
+            alt.ctor == "Option.some"
+                && alt.binders.len() == 1
+                && (count_var_uses(&alt.body, name) == 0
+                    // Name-keyed ownership tables admit only a shadowed identity arm:
+                    // repeated payloads (including captured join points) still
+                    // need its conservative clone flag.
+                    || alt.binders[0] == name
+                        && matches!(&alt.body, Expr::Ctor(ctor, args)
+                            if ctor == "Option.some"
+                                && matches!(args.as_slice(), [Expr::Var(returned)] if returned == name)))
+        })
+    {
+        return false;
+    }
+    alts.iter().any(|alt| {
+        alt.ctor == "Option.none"
+            && alt.binders.is_empty()
+            && matches!(&alt.body, Expr::Var(returned) if returned == name)
+    })
 }
 
 fn generate_def_in<'m>(
@@ -1278,6 +1373,16 @@ impl<'m> Renderer<'_, 'm> {
         self.render(expr, &Mode::Value)
     }
 
+    /// A read-only operand does not consume a local even when other uses do.
+    /// Cloning here can copy an entire parser record merely to read one field.
+    /// Non-local expressions retain ordinary evaluation and ownership rules.
+    fn read_value(&self, expr: &'m Expr) -> Result<String, Error> {
+        match self.resolved_inline(expr) {
+            Expr::Var(name) => Ok(rust_local_ident(name)),
+            other => self.value(other),
+        }
+    }
+
     fn owned_value(&self, expr: &'m Expr) -> Result<String, Error> {
         let rendered = self.value(expr)?;
         if expression_is_borrowed(expr, self.definitions, self.types, &self.borrowed_locals) {
@@ -1288,6 +1393,33 @@ impl<'m> Renderer<'_, 'm> {
         } else {
             Ok(rendered)
         }
+    }
+
+    fn parse_decimal(&self, value: &'m Expr, target: Option<&Type>) -> Result<String, Error> {
+        let parse = match target {
+            None => String::from("parse()"),
+            Some(
+                ty @ (Type::Int8
+                | Type::Int16
+                | Type::Int32
+                | Type::Int64
+                | Type::UInt8
+                | Type::UInt16
+                | Type::UInt32
+                | Type::UInt64),
+            ) => {
+                format!("parse::<{}>()", type_to_rust(ty)?)
+            }
+            Some(Type::Int) => return Err(Error::UnboundedInt),
+            Some(ty) => return Err(Error::OpaqueType(format!("parse-decimal-as target {ty:?}"))),
+        };
+        // Retain an owned temporary for the whole parse while borrowing an
+        // exact str view of String, &String, or &str. The explicit target on
+        // new IR prevents Rust inference from changing the source width.
+        Ok(format!(
+            "{{ let __input = &({}); let __text: &str = core::convert::AsRef::<str>::as_ref(__input); __text.{parse}.ok().filter(|__value| alloc::string::ToString::to_string(__value) == __text) }}",
+            self.read_value(value)?
+        ))
     }
 
     fn resolved_inline(&self, expr: &'m Expr) -> &'m Expr {
@@ -1311,21 +1443,8 @@ impl<'m> Renderer<'_, 'm> {
         }
     }
 
-    fn list_head_is_copy(&self, scrutinee: &Expr) -> bool {
-        let Expr::Var(name) = scrutinee else {
-            return true;
-        };
-        self.params
-            .iter()
-            .find_map(|(parameter, ty)| {
-                (parameter == name).then_some(ty).and_then(|ty| match ty {
-                    Type::List(element) => {
-                        Some(copy_type(element, self.types, &mut BTreeSet::new()))
-                    }
-                    _ => None,
-                })
-            })
-            .unwrap_or(true)
+    fn list_head_rebound_by_value(&self, scrutinee: &Expr) -> bool {
+        list_head_rebound_by_value(scrutinee, self.params, self.types)
     }
 
     /// The declaration of a constructor, by its full Lean name.
@@ -1392,11 +1511,11 @@ impl<'m> Renderer<'_, 'm> {
                         Ok(format!("&{value:?}"))
                     }
                     Some((Type::String | Type::Bytes, true)) => {
-                        let rendered = self.value(argument)?;
+                        let rendered = self.read_value(argument)?;
                         Ok(format!("({rendered}).as_ref()"))
                     }
                     Some((_, true)) => {
-                        let rendered = self.value(argument)?;
+                        let rendered = self.read_value(argument)?;
                         Ok(format!("&({rendered})"))
                     }
                     Some((_, false)) => self.owned_value(argument),
@@ -1520,12 +1639,12 @@ impl<'m> Renderer<'_, 'm> {
                     self.render_cons(&args[0], &args[1], out, env, *depth)
                 }
                 Mode::Value if self.is_empty_list(&args[1]) => {
-                    Ok(format!("alloc::vec![{}]", self.value(&args[0])?))
+                    Ok(format!("alloc::vec![{}]", self.owned_value(&args[0])?))
                 }
                 Mode::Value => Ok(format!(
                     "{{ let mut __list = alloc::vec![{}]; __list.extend({}); __list }}",
-                    self.value(&args[0])?,
-                    self.value(&args[1])?
+                    self.owned_value(&args[0])?,
+                    self.owned_value(&args[1])?
                 )),
             },
 
@@ -1679,30 +1798,33 @@ impl<'m> Renderer<'_, 'm> {
             )),
             Expr::Append(left, right) => Ok(format!(
                 "{{ let mut __value = {}; __value.extend_from_slice(&{}); __value }}",
-                self.value(left)?,
-                self.value(right)?
+                self.owned_value(left)?,
+                self.read_value(right)?
             )),
-            Expr::Length(value) => Ok(format!("({}).len() as u64", self.value(value)?)),
+            Expr::Length(value) => Ok(format!("({}).len() as u64", self.read_value(value)?)),
             Expr::Index(value, offset) => Ok(format!(
                 "usize::try_from({}).ok().and_then(|__index| ({}).get(__index).cloned())",
                 self.value(offset)?,
-                self.value(value)?
+                self.read_value(value)?
             )),
             Expr::Slice(value, start, count) => Ok(format!(
                 "{{ let __start = usize::try_from({}).ok(); let __count = usize::try_from({}).ok(); match (__start, __count) {{ (Some(__start), Some(__count)) => __start.checked_add(__count).and_then(|__end| ({}).get(__start..__end).map(|__slice| __slice.to_vec())), _ => None }} }}",
                 self.value(start)?,
                 self.value(count)?,
-                self.value(value)?
+                self.read_value(value)?
             )),
-            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.value(value)?)),
+            // Encoding consumes its String. Borrowed parameters and record
+            // fields must cross the existing owned boundary first; already
+            // owned Strings retain their allocation through `into_bytes`.
+            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.owned_value(value)?)),
             Expr::Utf8Decode(value) => Ok(format!(
                 "alloc::string::String::from_utf8({}).ok()",
                 self.value(value)?
             )),
             Expr::CompareBytes(left, right) => Ok(format!(
                 "({}).cmp(&{})",
-                self.value(left)?,
-                self.value(right)?
+                self.read_value(left)?,
+                self.read_value(right)?
             )),
             Expr::SplitExact(value, delimiter, maximum) => Ok(format!(
                 "{{ let __value = {}; let __delimiter = {}; let __maximum = usize::try_from({}).ok(); if __delimiter.is_empty() {{ None }} else {{ let __fields: alloc::vec::Vec<alloc::string::String> = __value.split(&__delimiter).map(alloc::string::String::from).collect(); __maximum.filter(|__maximum| __fields.len() <= *__maximum).map(|_| __fields) }} }}",
@@ -1712,13 +1834,11 @@ impl<'m> Renderer<'_, 'm> {
             )),
             Expr::Join(values, delimiter) => Ok(format!(
                 "({}).join(&{})",
-                self.value(values)?,
-                self.value(delimiter)?
+                self.read_value(values)?,
+                self.read_value(delimiter)?
             )),
-            Expr::ParseDecimal(value) => Ok(format!(
-                "{{ let __text = {}; __text.parse().ok().filter(|__value| alloc::string::ToString::to_string(__value) == __text) }}",
-                self.value(value)?
-            )),
+            Expr::ParseDecimal(value) => self.parse_decimal(value, None),
+            Expr::ParseDecimalAs(target, value) => self.parse_decimal(value, Some(target)),
             Expr::FormatDecimal(value) => {
                 Ok(format!("alloc::format!(\"{{}}\", {})", self.value(value)?))
             }
@@ -1775,13 +1895,25 @@ impl<'m> Renderer<'_, 'm> {
                 self.resolved_inline(b.as_ref()),
             ) {
                 (other, Expr::String(value)) | (Expr::String(value), other) => {
-                    Ok(format!("{} == {value:?}", self.value(other)?))
+                    Ok(format!("{} == {value:?}", self.read_value(other)?))
                 }
                 (Expr::Bytes(left), Expr::Bytes(right)) => Ok(format!("{}", left == right)),
                 (other, Expr::Bytes(value)) | (Expr::Bytes(value), other) => {
-                    Ok(format!("core::convert::AsRef::<[u8]>::as_ref(&({})) == &{value:?}", self.value(other)?))
+                    Ok(format!("core::convert::AsRef::<[u8]>::as_ref(&({})) == &{value:?}", self.read_value(other)?))
                 }
-                _ => self.binop(a, b, "=="),
+                _ => {
+                    let borrowed_a = expression_is_borrowed(a, self.definitions, self.types, &self.borrowed_locals);
+                    let borrowed_b = expression_is_borrowed(b, self.definitions, self.types, &self.borrowed_locals);
+                    let a = self.read_value(a)?;
+                    let b = self.read_value(b)?;
+                    // Equality borrows its operands; normalize mixed owned /
+                    // borrowed values without cloning either collection.
+                    match (borrowed_a, borrowed_b) {
+                        (false, true) => Ok(format!("(&({a}) == {b})")),
+                        (true, false) => Ok(format!("({a} == &({b}))")),
+                        _ => Ok(format!("({a} == {b})")),
+                    }
+                }
             },
             Expr::Lt(a, b) => self.binop(a, b, "<"),
             Expr::Le(a, b) => self.binop(a, b, "<="),
@@ -1854,7 +1986,7 @@ impl<'m> Renderer<'_, 'm> {
                 if self.types.contains_key(ty.as_str()) && field_type.is_none() {
                     return Err(Error::UnknownField(ty.clone(), field.clone()));
                 }
-                let projection = format!("({}).{}", self.value(e)?, rust_ident(field));
+                let projection = format!("({}).{}", self.read_value(e)?, rust_ident(field));
                 if field_type.is_some_and(|field_type| {
                     !copy_type(field_type, self.types, &mut BTreeSet::new())
                 }) {
@@ -1957,7 +2089,7 @@ impl<'m> Renderer<'_, 'm> {
         default: Option<&'m Expr>,
         mode: &Mode<'_, 'm>,
     ) -> Result<String, Error> {
-        let head_is_copy = self.list_head_is_copy(scrut);
+        let head_rebound_by_value = self.list_head_rebound_by_value(scrut);
         let scrut_is_borrowed =
             expression_is_borrowed(scrut, self.definitions, self.types, &self.borrowed_locals);
         let branch_borrows = alts
@@ -1997,7 +2129,7 @@ impl<'m> Renderer<'_, 'm> {
                 // Match ergonomics bind the head by reference; rebind it by
                 // value so arithmetic on it needs no dereference syntax.
                 ("List.nil", 0) => format!("        [] => {},\n", body),
-                ("List.cons", 2) if head_is_copy => format!(
+                ("List.cons", 2) if head_rebound_by_value => format!(
                     "        [{}, {} @ ..] => {{ let {} = {}.clone(); {} }},\n",
                     rust_local_ident(&alt.binders[0]),
                     rust_local_ident(&alt.binders[1]),

@@ -325,6 +325,18 @@ are generated artifacts; do not hand-edit either file.
 
 ## Closed byte literals
 
+Typed decimal parsing retains the exact integer result type from LCNF in
+`parse-decimal-as`, including when an Option payload is discarded or only
+compared with a literal. Legacy `parse-decimal` IR remains accepted. The real
+LexLean-generated decimal fixture checks fixed-width bounds and canonical
+syntax; mathematical `Int` remains rejected by the production renderer.
+
+UTF-8 encoding preserves the existing ownership boundary: borrowed String
+parameters and fields are copied into owned bytes, while owned Strings reuse
+their buffer. The ordinary Core-Wasm fixture suite executes borrowed, aliased,
+repeated and record-field inputs in native `std`, `no_std + alloc`, and actual
+Wasm, including Unicode, embedded NUL and allocation-bound cases.
+
 The portable `Bytes` ABI also accepts closed Lean `ByteArray` literals, including
 empty data and non-UTF-8 bytes. The lowerer folds only the typed
 `Array UInt8` literal construction chain consumed by `ByteArray.mk` into a
