@@ -14,3 +14,5 @@ workspace = true
 [dependencies]
 prod-ir = { version = "0.1.0", path = "../prod-ir" }
 sha2 = { workspace = true }
+serde_json = { workspace = true }
+wasmparser = { version = "=0.245.1", default-features = false, features = ["validate", "features", "prefer-btree-collections"] }

@@ -110,6 +110,7 @@ mod package;
 mod sdk;
 mod text_view;
 mod view;
+mod workspace_view;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -128,6 +129,10 @@ pub use text_view::{generate_text_view_v1, TextBrowserAdapterBinding, TextViewV1
 pub use view::{
     generate_holoview_bundle, generate_view_v1, BrowserAdapterBinding, EvaluatedViewV1,
     GeneratedViewV1, ViewOperation,
+};
+pub use workspace_view::{
+    generate_workspace_view_v1, GeneratedWorkspaceViewV1, WorkspaceBrowserBinding, WorkspaceGuest,
+    WorkspaceGuestRole, WorkspaceSdkAsset, WorkspaceViewError, WorkspaceViewV1,
 };
 
 /// Errors that can occur during code generation

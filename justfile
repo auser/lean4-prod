@@ -3,7 +3,7 @@ default:
     @just --list
 
 # Complete clean-checkout CI contract.
-ci: fixture-provenance prod fmt-check lint wasm-check portable-package core-wasm view text-view wasm-sdk-fixture uor-fixture
+ci: fixture-provenance prod fmt-check lint wasm-check portable-package core-wasm view text-view workspace-view wasm-sdk-fixture uor-fixture
 
 # Reproduce both closed View projections and compile the registry-bound browser
 # adapter to wasm32 with no handwritten target behavior.
@@ -13,6 +13,11 @@ view:
 # Closed UTF-8 transport generation, DOM behavior and compiled Wasm byte ABI.
 text-view:
     bash scripts/check-text-view.sh
+
+# Closed browser component projection and verified loader. Structural fixtures
+# test transport contracts, not application authority or source-proof acceptance.
+workspace-view:
+    bash scripts/check-workspace-view.sh
 
 # Export all portable runtime roots from the real LexLean-generated fixture,
 # build/test/package the result twice, and reject mathematical Int narrowing.
