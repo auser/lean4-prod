@@ -3,7 +3,11 @@ default:
     @just --list
 
 # Complete clean-checkout CI contract.
-ci: fixture-provenance prod fmt-check lint wasm-check portable-package core-wasm view text-view wasm-sdk-fixture uor-fixture
+ci: fixture-provenance prod fmt-check lint wasm-check portable-package typed-decimal core-wasm view text-view wasm-sdk-fixture uor-fixture
+
+# Preserve exact decimal integer targets from actual LexLean-generated LCNF.
+typed-decimal:
+    bash scripts/check-typed-decimal.sh
 
 # Reproduce both closed View projections and compile the registry-bound browser
 # adapter to wasm32 with no handwritten target behavior.

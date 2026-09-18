@@ -14,3 +14,5 @@ workspace = true
 [dependencies]
 prod-ir = { version = "0.1.0", path = "../prod-ir" }
 sha2 = { workspace = true }
+unicode-ident = { version = "=1.0.24", default-features = false }
+unicode-normalization = { version = "=0.1.25", default-features = false }

@@ -78,3 +78,4 @@ Everything else fails, precisely:
 | `UnresolvedCall` | the callee is neither @[prod]-tagged nor a whitelisted operator, so there is nothing to call |
 | `UnknownField` | a projection names a field the declared type does not have |
 | `UnsupportedJoinPoint` | a join point with several callers, or one that jumps to itself; only the single-caller form, which inlines at its jump site, has a lowering |
+| `DuplicateBinding` | simultaneous parameters or pattern fields repeat a name; nested shadowing and sibling name reuse remain supported |

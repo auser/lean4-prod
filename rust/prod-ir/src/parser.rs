@@ -29,6 +29,7 @@
 //!            | "(" "unreachable" ")"
 //!            | "(" "extern" '"' ident '"' expr* ")"        ; unresolved callee
 //!            | portable-op | "(" "string" json-string ")"
+//!            | "(" "parse-decimal-as" integer-type expr ")"
 //!            | "(" "bytes" byte* ")"                     ; closed u8 literals
 //! alt      ::= "(" "alt" '"' ident '"' "(" ident* ")" expr ")"
 //! default  ::= "(" "default" expr ")"
@@ -191,6 +192,21 @@ fn parse_type(input: &str) -> IResult<&str, Type> {
 
 fn parse_param(input: &str) -> IResult<&str, (String, Type)> {
     delimited(char('('), tuple((ws(ident), ws(parse_type))), char(')'))(input)
+}
+
+fn parse_decimal_type(input: &str) -> IResult<&str, Type> {
+    map_res(ws(ident), |name| match name.as_str() {
+        "Int" => Ok(Type::Int),
+        "Int8" => Ok(Type::Int8),
+        "Int16" => Ok(Type::Int16),
+        "Int32" => Ok(Type::Int32),
+        "Int64" => Ok(Type::Int64),
+        "UInt8" => Ok(Type::UInt8),
+        "UInt16" => Ok(Type::UInt16),
+        "UInt32" => Ok(Type::UInt32),
+        "UInt64" => Ok(Type::UInt64),
+        _ => Err(()),
+    })(input)
 }
 
 /// `(binders...)` — a parenthesized list of bare identifiers
@@ -460,7 +476,21 @@ fn parse_paren_expr(input: &str) -> IResult<&str, Expr> {
                     |(_, values, delimiter)| Expr::Join(Box::new(values), Box::new(delimiter)),
                 ),
                 map(
-                    tuple((tag("parse-decimal"), ws(parse_expr))),
+                    tuple((
+                        terminated(tag("parse-decimal-as"), peek(alt((multispace1, tag(";;"))))),
+                        parse_decimal_type,
+                        ws(parse_expr),
+                    )),
+                    |(_, target, value)| Expr::ParseDecimalAs(target, Box::new(value)),
+                ),
+                map(
+                    tuple((
+                        terminated(
+                            tag("parse-decimal"),
+                            peek(alt((multispace1, tag(";;"), tag("(")))),
+                        ),
+                        ws(parse_expr),
+                    )),
                     |(_, value)| Expr::ParseDecimal(Box::new(value)),
                 ),
                 map(
@@ -921,6 +951,48 @@ mod tests {
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Extern, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn typed_decimal_target_is_preserved_and_legacy_syntax_remains_valid() {
+        for (name, target) in [
+            ("Int", Type::Int),
+            ("Int8", Type::Int8),
+            ("Int16", Type::Int16),
+            ("Int32", Type::Int32),
+            ("Int64", Type::Int64),
+            ("UInt8", Type::UInt8),
+            ("UInt16", Type::UInt16),
+            ("UInt32", Type::UInt32),
+            ("UInt64", Type::UInt64),
+        ] {
+            let source = alloc::format!("(parse-decimal-as {name} input)");
+            let (rest, actual) = parse_expr(&source).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(
+                actual,
+                Expr::ParseDecimalAs(target, Box::new(Expr::Var("input".into())))
+            );
+        }
+        let (rest, old) = parse_expr("(parse-decimal input)").unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(old, Expr::ParseDecimal(Box::new(Expr::Var("input".into()))));
+        for source in [
+            "(parse-decimal-as)",
+            "(parse-decimal-as UInt8)",
+            "(parse-decimal-as UInt8 input extra)",
+            "(parse-decimal-as UInt128 input)",
+            "(parse-decimal-as UInt8input)",
+            "(parse-decimal-asUInt8 input)",
+            "(parse-decimal-as Nat input)",
+            "(parse-decimal-as Bool input)",
+            "(parse-decimal-as (Option UInt8) input)",
+        ] {
+            assert!(
+                parse_expr(source).is_err(),
+                "malformed typed decimal accepted: {source}"
+            );
         }
     }
 

@@ -107,9 +107,13 @@ pub enum Expr {
     Utf8Encode(Box<Expr>),
     Utf8Decode(Box<Expr>),
     CompareBytes(Box<Expr>, Box<Expr>),
+    /// String value, String delimiter, and an exact UInt32 maximum field count.
     SplitExact(Box<Expr>, Box<Expr>, Box<Expr>),
     Join(Box<Expr>, Box<Expr>),
     ParseDecimal(Box<Expr>),
+    /// Exact integer target retained from the producer's Option result type.
+    /// The legacy untyped opcode remains available for existing IR consumers.
+    ParseDecimalAs(Type, Box<Expr>),
     FormatDecimal(Box<Expr>),
     Quotient(Box<Expr>, Box<Expr>, Box<Expr>),
     Remainder(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -162,27 +166,12 @@ pub enum Expr {
     Extern(String, Vec<Expr>),
 }
 
-impl Expr {
-    /// The direct subexpressions of this node, in source order.
-    ///
-    /// The single traversal every consumer recurses with: `prod-codegen`'s
-    /// fallibility fixpoint and join-point analysis, and `prod-cli`'s extern
-    /// collection. It lived in `prod-codegen` and was hand-copied into
-    /// `prod-cli`, where the copy promptly fell behind by a variant; there is
-    /// one copy now, and it is here because `Expr` is here.
-    ///
-    /// The match below is deliberately **exhaustive**, listing the leaves
-    /// explicitly rather than ending in a `_ => {}` arm: a new `Expr` variant
-    /// must then be classified here as a leaf or as a recursive position, and
-    /// the compiler says so. A wildcard would silently treat it as a leaf and
-    /// make every consumer stop looking inside it.
-    ///
-    /// Returns an owned iterator over borrows (a `Vec` walk) rather than a
-    /// bespoke iterator type: the crate is `#![no_std] + alloc`, and the
-    /// allocation is confined to host-side analysis, never to generated code.
-    pub fn children(&self) -> impl Iterator<Item = &Expr> {
-        let mut out: Vec<&Expr> = Vec::new();
-        match self {
+// One exhaustive classification drives both borrow modes. A new node cannot
+// silently disappear from either analysis or a capture-avoiding rewrite.
+macro_rules! child_references {
+    ($node:expr; $($mutable:tt)?) => {{
+        let mut out: Vec<& $($mutable)? Expr> = Vec::new();
+        match $node {
             Expr::Proj(_, _, e) => out.push(e),
             Expr::Add(a, b)
             | Expr::Sub(a, b)
@@ -219,6 +208,7 @@ impl Expr {
             | Expr::Utf8Encode(value)
             | Expr::Utf8Decode(value)
             | Expr::ParseDecimal(value)
+            | Expr::ParseDecimalAs(_, value)
             | Expr::FormatDecimal(value) => out.push(value),
             Expr::Negate(value) => out.push(value),
             Expr::If(c, t, f)
@@ -237,14 +227,14 @@ impl Expr {
             Expr::Call(_, args)
             | Expr::Ctor(_, args)
             | Expr::Jmp(_, args)
-            | Expr::Extern(_, args) => out.extend(args.iter()),
+            | Expr::Extern(_, args) => out.extend(args),
             Expr::Match {
                 scrut,
                 alts,
                 default,
             } => {
                 out.push(scrut);
-                out.extend(alts.iter().map(|a| &a.body));
+                out.extend(IntoIterator::into_iter(alts).map(|a| & $($mutable)? a.body));
                 if let Some(d) = default {
                     out.push(d);
                 }
@@ -262,6 +252,24 @@ impl Expr {
             | Expr::Opaque(_) => {}
         }
         out.into_iter()
+    }};
+}
+
+impl Expr {
+    /// The direct subexpressions of this node, in source order.
+    ///
+    /// The shared exhaustive traversal serves fallibility, join-point and
+    /// extern analysis, and mutable rewrites. Its temporary Vec allocates only
+    /// in host-side analysis, never in the generated program.
+    pub fn children(&self) -> impl Iterator<Item = &Expr> {
+        child_references!(self;)
+    }
+
+    /// Mutable direct subexpressions in exactly the same order as `children`.
+    /// Binder declarations are not expressions; callers rewriting lexical
+    /// scopes handle those nodes before recursing through this iterator.
+    pub fn children_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        child_references!(self; mut)
     }
 }
 
@@ -355,6 +363,7 @@ mod tests {
         "Opaque",
         "Param",
         "ParseDecimal",
+        "ParseDecimalAs",
         "Pow",
         "Proj",
         "Quotient",
@@ -405,6 +414,7 @@ mod tests {
             Expr::SplitExact(..) => "SplitExact",
             Expr::Join(..) => "Join",
             Expr::ParseDecimal(..) => "ParseDecimal",
+            Expr::ParseDecimalAs(..) => "ParseDecimalAs",
             Expr::FormatDecimal(..) => "FormatDecimal",
             Expr::Quotient(..) => "Quotient",
             Expr::Remainder(..) => "Remainder",
@@ -469,6 +479,7 @@ mod tests {
             (Expr::Utf8Encode(bx("a")), vec!["a"]),
             (Expr::Utf8Decode(bx("a")), vec!["a"]),
             (Expr::ParseDecimal(bx("a")), vec!["a"]),
+            (Expr::ParseDecimalAs(Type::UInt8, bx("a")), vec!["a"]),
             (Expr::FormatDecimal(bx("a")), vec!["a"]),
             (Expr::Negate(bx("a")), vec!["a"]),
             // Binary.
@@ -564,6 +575,21 @@ mod tests {
                 })
                 .collect();
             assert_eq!(&seen, expected, "children of {}", variant(expr));
+            let mut rewritten = expr.clone();
+            let mutable_seen: Vec<Expr> = rewritten
+                .children_mut()
+                .map(|child| child.clone())
+                .collect();
+            assert_eq!(mutable_seen, expr.children().cloned().collect::<Vec<_>>());
+            for (index, child) in rewritten.children_mut().enumerate() {
+                *child = Expr::Nat(index as u64);
+            }
+            assert_eq!(
+                rewritten.children().cloned().collect::<Vec<_>>(),
+                (0..expected.len())
+                    .map(|index| Expr::Nat(index as u64))
+                    .collect::<Vec<_>>()
+            );
         }
 
         let mut covered: Vec<&'static str> = cases.iter().map(|(e, _)| variant(e)).collect();

@@ -168,6 +168,18 @@ Rust side:
 prod_macros::prod_defs! { ir = "kernel.ir" }   // typed, zero-cost Rust fns
 ```
 
+The Rust code-generation APIs, including Cargo and Core-Wasm packages, preserve
+lexical parameter, let, match, and join-point scopes. Colliding local names are
+normalized deterministically before ownership analysis; already hygienic names
+retain their output bytes.
+Local spellings that are not Rust Unicode-XID identifiers receive fresh names;
+collision checks use Rust's NFC identity, so distinct IR locals such as `K` and
+`K` remain distinct without rewriting valid, noncolliding Unicode spellings.
+This local-binding boundary does not rename global definitions or types.
+Positional parameters still refer to the original formal parameters under
+shadowing. Duplicate names within one parameter or pattern-binding group are
+rejected as `DuplicateBinding`, rather than choosing an ambiguous binding.
+
 ### C headers and foreign-function calls
 
 The CLI can generate both sides of a small, explicit C ABI: a header for C
@@ -215,6 +227,12 @@ All SDKs target the same scalar C ABI (`Nat`/`Int`/`Bool`) and the same status
 codes, so the compiled Rust library remains the single implementation. The
 TypeScript binding accepts a native function loader (for example `koffi` or
 `ffi-napi`), Python uses `ctypes`, and Kotlin uses JNA.
+
+Scalar wrappers independently normalize parameter names that collide with a
+target language keyword, imported helper, temporary, or callee. One positional
+mapping is shared by all six adapters; safe names retain their bytes, and
+exported symbols, scalar types, argument order, and status handling are unchanged.
+This parameter boundary does not rename global definitions or generated types.
 
 To generate only one language, use a language-specific recipe:
 
@@ -324,6 +342,18 @@ layout contract before they can safely cross a C ABI. The header and wrapper
 are generated artifacts; do not hand-edit either file.
 
 ## Closed byte literals
+
+Typed decimal parsing retains the exact integer result type from LCNF in
+`parse-decimal-as`, including when an Option payload is discarded or only
+compared with a literal. Legacy `parse-decimal` IR remains accepted. The real
+LexLean-generated decimal fixture checks fixed-width bounds and canonical
+syntax; mathematical `Int` remains rejected by the production renderer.
+
+UTF-8 encoding preserves the existing ownership boundary: borrowed String
+parameters and fields are copied into owned bytes, while owned Strings reuse
+their buffer. The ordinary Core-Wasm fixture suite executes borrowed, aliased,
+repeated and record-field inputs in native `std`, `no_std + alloc`, and actual
+Wasm, including Unicode, embedded NUL and allocation-bound cases.
 
 The portable `Bytes` ABI also accepts closed Lean `ByteArray` literals, including
 empty data and non-UTF-8 bytes. The lowerer folds only the typed
