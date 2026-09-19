@@ -219,6 +219,8 @@ struct ViewBinding {
 /// (`Prod.subsetJson`, `lean/Prod/Emit.lean`).
 #[derive(Debug, serde::Deserialize)]
 struct SubsetFile {
+    #[serde(default)]
+    control_flow: Vec<String>,
     operators: Vec<String>,
     deciders: Vec<String>,
     types: Vec<String>,
@@ -252,6 +254,12 @@ fn render_subset(subset: &SubsetFile) -> String {
          Callers that need the invariant must re-check it in Rust; the\n\
          generated struct is a plain data carrier, not a refinement type.\n",
     );
+    if !subset.control_flow.is_empty() {
+        out.push_str("\n## First-order control flow\n\n");
+        for rule in &subset.control_flow {
+            out.push_str(&format!("- {rule}\n"));
+        }
+    }
     out.push_str("\n## Operators\n\n");
     for op in &subset.operators {
         out.push_str(&format!("- `{}`\n", op));

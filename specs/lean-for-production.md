@@ -38,6 +38,13 @@ O: 0 }` is constructible in Rust where the Lean type forbids it.
 Callers that need the invariant must re-check it in Rust; the
 generated struct is a plain data carrier, not a refinement type.
 
+## First-order control flow
+
+- Saturated, non-escaping, acyclic first-order local functions with runtime-valued arguments; no runtime closure values or erased/type local-call arguments
+- Local-function admission: 65536 aggregate Code/argument/parameter elements and 128 local calls per path
+- LocalFunctionError: inputLimit, depthLimit, escaping, arity, recursive, unsupported; no partial or overapplied local calls
+- Expression-valued continuation expansion preserves non-tail caller continuations, lexical captures and eager argument evaluation
+
 ## Operators
 
 - `Nat.add`
@@ -67,7 +74,7 @@ Everything else fails, precisely:
 |---|---|
 | `OpaqueExpr` | an expression with no Rust rendering |
 | `ParamOutOfBounds` | a parameter index outside the definition's parameter list |
-| `UnsupportedList` | a list value outside a supported position: nested inside another type, or used as an intermediate value rather than a slice parameter/output buffer |
+| `UnsupportedList` | a list value outside supported slice, output-buffer, constant or owned collection positions; computed eager jump arguments in builder/static mode require unsupported intermediate storage |
 | `HeapType` | a type that would require a heap allocation in generated code |
 | `RecursiveType` | an inductive refers to itself (directly, or through one level of indirection); needs the tier-1 memory profile |
 | `PolymorphicType` | an inductive has type parameters; monomorphization is not implemented |
@@ -77,4 +84,6 @@ Everything else fails, precisely:
 | `UnboundedInt` | mathematical Lean Int reaches a fixed-width runtime target |
 | `UnresolvedCall` | the callee is neither @[prod]-tagged nor a whitelisted operator, so there is nothing to call |
 | `UnknownField` | a projection names a field the declared type does not have |
-| `UnsupportedJoinPoint` | a join point with several callers, or one that jumps to itself; only the single-caller form, which inlines at its jump site, has a lowering |
+| `UnsupportedJoinPoint` | a cyclic join point or a jump whose argument count differs from its parameters; acyclic continuations are specialized before ownership analysis |
+| `JoinExpansionLimit` | acyclic join expansion exceeds 65536 expression nodes or 128 nested continuation calls per definition; checked before materialization, not an application memory or general IR-depth guarantee |
+| `DuplicateBinding` | simultaneous parameters or pattern fields repeat a name; nested shadowing and sibling name reuse remain supported |

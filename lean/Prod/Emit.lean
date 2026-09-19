@@ -69,7 +69,12 @@ def subsetJson : String :=
                 "parameterless, non-recursive, single-constructor structures (Prop fields erased)"]
   let quoted (xs : List String) : String :=
     String.intercalate ", " (xs.map fun s => "\"" ++ jsonEscape s ++ "\"")
-  "{\n  \"operators\": [" ++ quoted ops ++ "],\n  \"deciders\": [" ++ quoted deciders ++
+  let controlFlow := [
+    "Saturated, non-escaping, acyclic first-order local functions with runtime-valued arguments; no runtime closure values or erased/type local-call arguments",
+    s!"Local-function admission: {localFunctionNodeLimit} aggregate Code/argument/parameter elements and {localFunctionDepthLimit} local calls per path",
+    "LocalFunctionError: inputLimit, depthLimit, escaping, arity, recursive, unsupported; no partial or overapplied local calls",
+    "Expression-valued continuation expansion preserves non-tail caller continuations, lexical captures and eager argument evaluation"]
+  "{\n  \"control_flow\": [" ++ quoted controlFlow ++ "],\n  \"operators\": [" ++ quoted ops ++ "],\n  \"deciders\": [" ++ quoted deciders ++
     "],\n  \"types\": [" ++ quoted types ++ "]\n}\n"
 
 /-- The whole export, as a CoreM computation over the imported environment. -/

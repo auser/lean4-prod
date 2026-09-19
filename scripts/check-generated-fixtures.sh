@@ -36,3 +36,4 @@ if grep -En '\<(sorry|admit|axiom|opaque)\>' "${generated_paths[@]/#/$repo_root/
 fi
 
 echo "generated-fixture provenance passed"
+node "$repo_root/scripts/check-typed-decimal-provenance.mjs"

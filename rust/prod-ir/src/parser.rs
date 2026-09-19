@@ -29,6 +29,7 @@
 //!            | "(" "unreachable" ")"
 //!            | "(" "extern" '"' ident '"' expr* ")"        ; unresolved callee
 //!            | portable-op | "(" "string" json-string ")"
+//!            | "(" "parse-decimal-as" integer-type expr ")"
 //!            | "(" "bytes" byte* ")"                     ; closed u8 literals
 //! alt      ::= "(" "alt" '"' ident '"' "(" ident* ")" expr ")"
 //! default  ::= "(" "default" expr ")"
@@ -123,7 +124,26 @@ fn parse_i64(input: &str) -> IResult<&str, i64> {
     )(input)
 }
 
+// Compiler resource limits, not a restriction on Lean's mathematical semantics.
+// Let continuation spines are iterative; other recursive descent stays bounded.
+const MAX_EXPRESSION_DEPTH: usize = 4096;
+const MAX_RECURSIVE_DEPTH: usize = 64;
+const MAX_TYPE_DEPTH: usize = 64;
+
+fn capacity_error<T>(input: &str) -> IResult<&str, T> {
+    Err(nom::Err::Failure(NomError::new(input, ErrorKind::TooLarge)))
+}
+
 fn parse_type(input: &str) -> IResult<&str, Type> {
+    parse_type_at(input, MAX_TYPE_DEPTH)
+}
+
+fn parse_type_at(input: &str, remaining: usize) -> IResult<&str, Type> {
+    let (input, ()) = space_and_comments(input)?;
+    if remaining == 0 && input.starts_with('(') {
+        return capacity_error(input);
+    }
+    let child = |input| parse_type_at(input, remaining.saturating_sub(1));
     ws(alt((
         value(Type::Nat, tag("Nat")),
         value(Type::Int8, tag("Int8")),
@@ -140,34 +160,26 @@ fn parse_type(input: &str) -> IResult<&str, Type> {
         value(Type::Ordering, tag("Ordering")),
         value(Type::Bool, tag("Bool")),
         map(
-            delimited(char('('), tuple((tag("Option"), parse_type)), char(')')),
+            delimited(char('('), tuple((tag("Option"), child)), char(')')),
             |(_, t)| Type::Option(Box::new(t)),
         ),
         map(
-            delimited(
-                char('('),
-                tuple((tag("Result"), parse_type, parse_type)),
-                char(')'),
-            ),
+            delimited(char('('), tuple((tag("Result"), child, child)), char(')')),
             |(_, ok, error)| Type::Result {
                 ok: Box::new(ok),
                 error: Box::new(error),
             },
         ),
         map(
-            delimited(char('('), tuple((tag("Vec"), parse_type)), char(')')),
+            delimited(char('('), tuple((tag("Vec"), child)), char(')')),
             |(_, t)| Type::Vec(Box::new(t)),
         ),
         map(
-            delimited(char('('), tuple((tag("List"), parse_type)), char(')')),
+            delimited(char('('), tuple((tag("List"), child)), char(')')),
             |(_, t)| Type::List(Box::new(t)),
         ),
         map(
-            delimited(
-                char('('),
-                tuple((tag("Tuple"), many0(parse_type))),
-                char(')'),
-            ),
+            delimited(char('('), tuple((tag("Tuple"), many0(child))), char(')')),
             |(_, ts)| Type::Tuple(ts),
         ),
         map(
@@ -193,13 +205,28 @@ fn parse_param(input: &str) -> IResult<&str, (String, Type)> {
     delimited(char('('), tuple((ws(ident), ws(parse_type))), char(')'))(input)
 }
 
+fn parse_decimal_type(input: &str) -> IResult<&str, Type> {
+    map_res(ws(ident), |name| match name.as_str() {
+        "Int" => Ok(Type::Int),
+        "Int8" => Ok(Type::Int8),
+        "Int16" => Ok(Type::Int16),
+        "Int32" => Ok(Type::Int32),
+        "Int64" => Ok(Type::Int64),
+        "UInt8" => Ok(Type::UInt8),
+        "UInt16" => Ok(Type::UInt16),
+        "UInt32" => Ok(Type::UInt32),
+        "UInt64" => Ok(Type::UInt64),
+        _ => Err(()),
+    })(input)
+}
+
 /// `(binders...)` — a parenthesized list of bare identifiers
 fn parse_binders(input: &str) -> IResult<&str, Vec<String>> {
     delimited(char('('), many0(ws(ident)), char(')'))(input)
 }
 
 /// `(alt "CtorName" (binders...) <body>)`
-fn parse_alt(input: &str) -> IResult<&str, Alt> {
+fn parse_alt(input: &str, depth: usize, recursion: usize) -> IResult<&str, Alt> {
     map(
         delimited(
             char('('),
@@ -207,7 +234,7 @@ fn parse_alt(input: &str) -> IResult<&str, Alt> {
                 tag("alt"),
                 ws(quoted_ident),
                 ws(parse_binders),
-                ws(parse_expr),
+                ws(|input| parse_expr_at(input, depth, recursion)),
             )),
             char(')'),
         ),
@@ -220,11 +247,14 @@ fn parse_alt(input: &str) -> IResult<&str, Alt> {
 }
 
 /// `(default <body>)`
-fn parse_default(input: &str) -> IResult<&str, Expr> {
+fn parse_default(input: &str, depth: usize, recursion: usize) -> IResult<&str, Expr> {
     map(
         delimited(
             char('('),
-            tuple((tag("default"), ws(parse_expr))),
+            tuple((
+                tag("default"),
+                ws(|input| parse_expr_at(input, depth, recursion)),
+            )),
             char(')'),
         ),
         |(_, body)| body,
@@ -232,280 +262,212 @@ fn parse_default(input: &str) -> IResult<&str, Expr> {
 }
 
 fn parse_expr(input: &str) -> IResult<&str, Expr> {
-    ws(alt((
-        map(parse_u64, Expr::Nat),
-        map(parse_i64, Expr::Int),
-        map(tag("true"), |_| Expr::Bool(true)),
-        map(tag("false"), |_| Expr::Bool(false)),
-        parse_paren_expr,
-        map(ident, Expr::Var),
-    )))(input)
+    parse_expr_at(input, MAX_EXPRESSION_DEPTH, MAX_RECURSIVE_DEPTH)
 }
 
-/// All parenthesized expression forms, dispatched on the leading keyword.
-/// Split into two `alt` groups to stay within nom's tuple arity limit.
-fn parse_paren_expr(input: &str) -> IResult<&str, Expr> {
-    delimited(
+fn parse_let_prefix(input: &str) -> IResult<&str, &str> {
+    preceded(
         char('('),
+        preceded(
+            space_and_comments,
+            terminated(tag("let"), peek(alt((multispace1, tag(";;"))))),
+        ),
+    )(input)
+}
+
+fn parse_expr_at(mut input: &str, mut depth: usize, recursion: usize) -> IResult<&str, Expr> {
+    let mut bindings = Vec::new();
+    loop {
+        (input, ()) = space_and_comments(input)?;
+        let Ok((after_keyword, _)) = parse_let_prefix(input) else {
+            break;
+        };
+        if depth == 0 || recursion == 0 {
+            return capacity_error(input);
+        }
+        let (after_name, name) = ws(ident)(after_keyword)?;
+        let (after_value, value) = parse_expr_at(after_name, depth - 1, recursion - 1)?;
+        bindings.push((name, value));
+        input = after_value;
+        depth -= 1;
+    }
+    let (mut rest, mut body) = if input.starts_with('(') {
+        if depth == 0 || recursion == 0 {
+            return capacity_error(input);
+        }
+        parse_paren_expr(input, depth - 1, recursion - 1)?
+    } else {
         ws(alt((
-            alt((
-                map(tuple((tag("param"), ws(parse_u64))), |(_, idx)| {
-                    Expr::Param(idx as usize)
-                }),
-                map(
-                    tuple((tag("add"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Add(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("sub"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Sub(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("mul"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Mul(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("div"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Div(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("mod"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Mod(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("shl"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Shl(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("shr"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Shr(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("pow"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Pow(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("eq"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Eq(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("lt"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Lt(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    // `le` must be delimiter-terminated: bare `tag("le")`
-                    // prefix-matches the `let` keyword and derails the
-                    // enclosing alt (no backtracking reaches `let`).
-                    tuple((
-                        terminated(tag("le"), multispace1),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                    )),
-                    |(_, a, b)| Expr::Le(Box::new(a), Box::new(b)),
-                ),
-            )),
-            alt((
-                map(
-                    tuple((tag("gt"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Gt(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("if"), ws(parse_expr), ws(parse_expr), ws(parse_expr))),
-                    |(_, cond, t, f)| Expr::If(Box::new(cond), Box::new(t), Box::new(f)),
-                ),
-                map(
-                    tuple((tag("let"), ws(ident), ws(parse_expr), ws(parse_expr))),
-                    |(_, name, val, body)| Expr::Let(name, Box::new(val), Box::new(body)),
-                ),
-                map(
-                    tuple((tag("call"), ws(ident), many0(ws(parse_expr)))),
-                    |(_, name, args)| Expr::Call(name, args),
-                ),
-                map(
-                    tuple((
-                        tag("cases"),
-                        ws(parse_expr),
-                        many0(ws(parse_alt)),
-                        opt(ws(parse_default)),
-                    )),
-                    |(_, scrut, alts, default)| Expr::Match {
-                        scrut: Box::new(scrut),
-                        alts,
+            map(parse_u64, Expr::Nat),
+            map(parse_i64, Expr::Int),
+            map(tag("true"), |_| Expr::Bool(true)),
+            map(tag("false"), |_| Expr::Bool(false)),
+            map(ident, Expr::Var),
+        )))(input)?
+    };
+    for (name, value) in bindings.into_iter().rev() {
+        (rest, _) = ws(char(')'))(rest)?;
+        body = Expr::Let(name, Box::new(value), Box::new(body));
+    }
+    Ok((rest, body))
+}
+
+type UnaryExpression = fn(Box<Expr>) -> Expr;
+type BinaryExpression = fn(Box<Expr>, Box<Expr>) -> Expr;
+type TernaryExpression = fn(Box<Expr>, Box<Expr>, Box<Expr>) -> Expr;
+
+fn unary_operator(name: &str) -> Option<UnaryExpression> {
+    Some(match name {
+        "checked-neg" => Expr::CheckedNeg,
+        "bit-not" => Expr::BitNot,
+        "checked-convert" => Expr::CheckedConvert,
+        "length" => Expr::Length,
+        "utf8-encode" => Expr::Utf8Encode,
+        "utf8-decode" => Expr::Utf8Decode,
+        "parse-decimal" => Expr::ParseDecimal,
+        "format-decimal" => Expr::FormatDecimal,
+        "negate" => Expr::Negate,
+        _ => return None,
+    })
+}
+
+fn binary_operator(name: &str) -> Option<BinaryExpression> {
+    Some(match name {
+        "add" => Expr::Add,
+        "sub" => Expr::Sub,
+        "mul" => Expr::Mul,
+        "div" => Expr::Div,
+        "mod" => Expr::Mod,
+        "shl" => Expr::Shl,
+        "shr" => Expr::Shr,
+        "pow" => Expr::Pow,
+        "eq" => Expr::Eq,
+        "lt" => Expr::Lt,
+        "le" => Expr::Le,
+        "gt" => Expr::Gt,
+        "checked-add" => Expr::CheckedAdd,
+        "checked-sub" => Expr::CheckedSub,
+        "checked-mul" => Expr::CheckedMul,
+        "checked-div" => Expr::CheckedDiv,
+        "bit-and" => Expr::BitAnd,
+        "bit-or" => Expr::BitOr,
+        "bit-xor" => Expr::BitXor,
+        "checked-shl" => Expr::CheckedShl,
+        "checked-shr" => Expr::CheckedShr,
+        "append" => Expr::Append,
+        "index" => Expr::Index,
+        "compare-bytes" => Expr::CompareBytes,
+        "join" => Expr::Join,
+        _ => return None,
+    })
+}
+
+fn ternary_operator(name: &str) -> Option<TernaryExpression> {
+    Some(match name {
+        "if" => Expr::If,
+        "slice" => Expr::Slice,
+        "split-exact" => Expr::SplitExact,
+        "quotient" => Expr::Quotient,
+        "remainder" => Expr::Remainder,
+        _ => return None,
+    })
+}
+
+/// Dispatch exact operator tokens without keeping every nom alternative on
+/// each recursive frame. In particular, neither le/let nor parse-decimal's
+/// typed form can prefix-match a different supported operator.
+fn parse_paren_expr(input: &str, depth: usize, recursion: usize) -> IResult<&str, Expr> {
+    let child = |input| parse_expr_at(input, depth, recursion);
+    let (input, _) = char('(')(input)?;
+    let (input, operator) = ws(take_while1(|c: char| {
+        c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
+    }))(input)?;
+    let (rest, expression) = if let Some(constructor) = unary_operator(operator) {
+        let (rest, value) = child(input)?;
+        (rest, constructor(Box::new(value)))
+    } else if let Some(constructor) = binary_operator(operator) {
+        let (rest, left) = child(input)?;
+        let (rest, right) = child(rest)?;
+        (rest, constructor(Box::new(left), Box::new(right)))
+    } else if let Some(constructor) = ternary_operator(operator) {
+        let (rest, first) = child(input)?;
+        let (rest, second) = child(rest)?;
+        let (rest, third) = child(rest)?;
+        (
+            rest,
+            constructor(Box::new(first), Box::new(second), Box::new(third)),
+        )
+    } else {
+        match operator {
+            "param" => map(ws(parse_u64), |index| Expr::Param(index as usize))(input)?,
+            "call" | "jmp" => {
+                let (rest, name) = ws(ident)(input)?;
+                let (rest, arguments) = many0(child)(rest)?;
+                let expression = if operator == "call" {
+                    Expr::Call(name, arguments)
+                } else {
+                    Expr::Jmp(name, arguments)
+                };
+                (rest, expression)
+            }
+            "ctor" | "extern" => {
+                let (rest, name) = ws(quoted_ident)(input)?;
+                let (rest, arguments) = many0(child)(rest)?;
+                let expression = if operator == "ctor" {
+                    Expr::Ctor(name, arguments)
+                } else {
+                    Expr::Extern(name, arguments)
+                };
+                (rest, expression)
+            }
+            "cases" => {
+                let (rest, scrutinee) = child(input)?;
+                let (rest, alternatives) =
+                    many0(ws(|input| parse_alt(input, depth, recursion)))(rest)?;
+                let (rest, default) =
+                    opt(ws(|input| parse_default(input, depth, recursion)))(rest)?;
+                (
+                    rest,
+                    Expr::Match {
+                        scrut: Box::new(scrutinee),
+                        alts: alternatives,
                         default: default.map(Box::new),
                     },
-                ),
-                map(
-                    tuple((tag("ctor"), ws(quoted_ident), many0(ws(parse_expr)))),
-                    |(_, name, args)| Expr::Ctor(name, args),
-                ),
-                map(
-                    tuple((
-                        tag("proj"),
-                        ws(quoted_ident),
-                        ws(quoted_ident),
-                        ws(parse_expr),
-                    )),
-                    |(_, ty, field, e)| Expr::Proj(ty, field, Box::new(e)),
-                ),
-                map(
-                    tuple((tag("jp"), ws(ident), ws(parse_binders), ws(parse_expr))),
-                    |(_, name, params, body)| Expr::Jp {
+                )
+            }
+            "proj" => {
+                let (rest, ty) = ws(quoted_ident)(input)?;
+                let (rest, field) = ws(quoted_ident)(rest)?;
+                let (rest, value) = child(rest)?;
+                (rest, Expr::Proj(ty, field, Box::new(value)))
+            }
+            "jp" => {
+                let (rest, name) = ws(ident)(input)?;
+                let (rest, params) = ws(parse_binders)(rest)?;
+                let (rest, body) = child(rest)?;
+                (
+                    rest,
+                    Expr::Jp {
                         name,
                         params,
                         body: Box::new(body),
                     },
-                ),
-                map(
-                    tuple((tag("jmp"), ws(ident), many0(ws(parse_expr)))),
-                    |(_, name, args)| Expr::Jmp(name, args),
-                ),
-                map(tag("unreachable"), |_| Expr::Unreachable),
-                map(tuple((tag("opaque"), ws(quoted_ident))), |(_, s)| {
-                    Expr::Opaque(s)
-                }),
-                map(
-                    tuple((tag("extern"), ws(quoted_ident), many0(ws(parse_expr)))),
-                    |(_, name, args)| Expr::Extern(name, args),
-                ),
-            )),
-            alt((
-                map(
-                    tuple((tag("checked-add"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedAdd(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("checked-sub"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedSub(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("checked-mul"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedMul(Box::new(a), Box::new(b)),
-                ),
-                map(tuple((tag("checked-neg"), ws(parse_expr))), |(_, value)| {
-                    Expr::CheckedNeg(Box::new(value))
-                }),
-                map(
-                    tuple((tag("checked-div"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedDiv(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("bit-and"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::BitAnd(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("bit-or"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::BitOr(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("bit-xor"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::BitXor(Box::new(a), Box::new(b)),
-                ),
-                map(tuple((tag("bit-not"), ws(parse_expr))), |(_, value)| {
-                    Expr::BitNot(Box::new(value))
-                }),
-                map(
-                    tuple((tag("checked-shl"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedShl(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((tag("checked-shr"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CheckedShr(Box::new(a), Box::new(b)),
-                ),
-            )),
-            alt((
-                map(
-                    tuple((tag("checked-convert"), ws(parse_expr))),
-                    |(_, value)| Expr::CheckedConvert(Box::new(value)),
-                ),
-                map(
-                    tuple((tag("append"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::Append(Box::new(a), Box::new(b)),
-                ),
-                map(tuple((tag("length"), ws(parse_expr))), |(_, value)| {
-                    Expr::Length(Box::new(value))
-                }),
-                map(
-                    tuple((tag("index"), ws(parse_expr), ws(parse_expr))),
-                    |(_, value, offset)| Expr::Index(Box::new(value), Box::new(offset)),
-                ),
-                map(
-                    tuple((tag("slice"), ws(parse_expr), ws(parse_expr), ws(parse_expr))),
-                    |(_, value, start, count)| {
-                        Expr::Slice(Box::new(value), Box::new(start), Box::new(count))
-                    },
-                ),
-                map(tuple((tag("utf8-encode"), ws(parse_expr))), |(_, value)| {
-                    Expr::Utf8Encode(Box::new(value))
-                }),
-                map(tuple((tag("utf8-decode"), ws(parse_expr))), |(_, value)| {
-                    Expr::Utf8Decode(Box::new(value))
-                }),
-                map(
-                    tuple((tag("compare-bytes"), ws(parse_expr), ws(parse_expr))),
-                    |(_, a, b)| Expr::CompareBytes(Box::new(a), Box::new(b)),
-                ),
-                map(
-                    tuple((
-                        tag("split-exact"),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                    )),
-                    |(_, value, delimiter, maximum)| {
-                        Expr::SplitExact(Box::new(value), Box::new(delimiter), Box::new(maximum))
-                    },
-                ),
-                map(
-                    tuple((tag("join"), ws(parse_expr), ws(parse_expr))),
-                    |(_, values, delimiter)| Expr::Join(Box::new(values), Box::new(delimiter)),
-                ),
-                map(
-                    tuple((tag("parse-decimal"), ws(parse_expr))),
-                    |(_, value)| Expr::ParseDecimal(Box::new(value)),
-                ),
-                map(
-                    tuple((tag("format-decimal"), ws(parse_expr))),
-                    |(_, value)| Expr::FormatDecimal(Box::new(value)),
-                ),
-                map(
-                    tuple((
-                        tag("quotient"),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                    )),
-                    |(_, left, right, zero)| {
-                        Expr::Quotient(Box::new(left), Box::new(right), Box::new(zero))
-                    },
-                ),
-                map(
-                    tuple((
-                        tag("remainder"),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                        ws(parse_expr),
-                    )),
-                    |(_, left, right, zero)| {
-                        Expr::Remainder(Box::new(left), Box::new(right), Box::new(zero))
-                    },
-                ),
-                map(tuple((tag("negate"), ws(parse_expr))), |(_, value)| {
-                    Expr::Negate(Box::new(value))
-                }),
-                map(tuple((tag("string"), ws(quoted_string))), |(_, value)| {
-                    Expr::String(value)
-                }),
-                map(
-                    preceded(
-                        terminated(tag("bytes"), peek(alt((multispace1, tag(")"), tag(";;"))))),
-                        many0(ws(map_res(digit1, str::parse::<u8>))),
-                    ),
-                    Expr::Bytes,
-                ),
-            )),
-        ))),
-        ws(char(')')),
-    )(input)
+                )
+            }
+            "parse-decimal-as" => {
+                let (rest, target) = parse_decimal_type(input)?;
+                let (rest, value) = child(rest)?;
+                (rest, Expr::ParseDecimalAs(target, Box::new(value)))
+            }
+            "unreachable" => (input, Expr::Unreachable),
+            "opaque" => map(ws(quoted_ident), Expr::Opaque)(input)?,
+            "string" => map(ws(quoted_string), Expr::String)(input)?,
+            "bytes" => map(many0(ws(map_res(digit1, str::parse::<u8>))), Expr::Bytes)(input)?,
+            _ => return Err(nom::Err::Error(NomError::new(input, ErrorKind::Tag))),
+        }
+    };
+    let (rest, _) = ws(char(')'))(rest)?;
+    Ok((rest, expression))
 }
 
 /// `(name Type)` — one field of a constructor declaration.
@@ -588,6 +550,17 @@ fn parse_definition(input: &str) -> IResult<&str, Definition> {
     ))
 }
 
+/// Parse one IR module and return the unconsumed suffix.
+///
+/// # Allocation and limits
+///
+/// This allocating compiler boundary returns an owned AST. Expression depth is
+/// limited to 4096 parenthesized expression nodes; a let continuation spine is
+/// parsed iteratively. Other recursive expression descent and nested type forms
+/// are limited to 64 levels. Exhaustion returns `Failure(TooLarge)` rather than
+/// recursing further. These are compiler resource limits, not Lean semantics.
+/// Callers requiring a complete document must also reject a nonempty suffix.
+/// Downstream AST transformations remain responsible for their own stack bounds.
 pub fn parse_module(input: &str) -> IResult<&str, Module> {
     let (rest, (_, name, types, definitions)) = ws(delimited(
         char('('),
@@ -921,6 +894,48 @@ mod tests {
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Extern, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn typed_decimal_target_is_preserved_and_legacy_syntax_remains_valid() {
+        for (name, target) in [
+            ("Int", Type::Int),
+            ("Int8", Type::Int8),
+            ("Int16", Type::Int16),
+            ("Int32", Type::Int32),
+            ("Int64", Type::Int64),
+            ("UInt8", Type::UInt8),
+            ("UInt16", Type::UInt16),
+            ("UInt32", Type::UInt32),
+            ("UInt64", Type::UInt64),
+        ] {
+            let source = alloc::format!("(parse-decimal-as {name} input)");
+            let (rest, actual) = parse_expr(&source).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(
+                actual,
+                Expr::ParseDecimalAs(target, Box::new(Expr::Var("input".into())))
+            );
+        }
+        let (rest, old) = parse_expr("(parse-decimal input)").unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(old, Expr::ParseDecimal(Box::new(Expr::Var("input".into()))));
+        for source in [
+            "(parse-decimal-as)",
+            "(parse-decimal-as UInt8)",
+            "(parse-decimal-as UInt8 input extra)",
+            "(parse-decimal-as UInt128 input)",
+            "(parse-decimal-as UInt8input)",
+            "(parse-decimal-asUInt8 input)",
+            "(parse-decimal-as Nat input)",
+            "(parse-decimal-as Bool input)",
+            "(parse-decimal-as (Option UInt8) input)",
+        ] {
+            assert!(
+                parse_expr(source).is_err(),
+                "malformed typed decimal accepted: {source}"
+            );
         }
     }
 

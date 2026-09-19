@@ -40,4 +40,47 @@ public structure ProjectionRight where
 public def sumProjectionIds (left : ProjectionLeft) (right : ProjectionRight) : Nat :=
   left.id + right.id
 
+public inductive SharedOperation where
+  | create | inspect | restore | replace
+
+public structure SharedState where
+  value : Nat
+
+public def sharedPredicate (left right : Nat) : Bool := left == right
+
+-- Ordinary repeated alternatives cause Lean's base LCNF to share a captured
+-- local function. The source itself contains no lambda or higher-order value.
+public def sharedEnumMatch (state : SharedState) (operation : SharedOperation)
+    (candidate : Nat) : Bool :=
+  match operation with
+  | .create => sharedPredicate candidate 17
+  | .inspect => sharedPredicate candidate state.value
+  | .restore => sharedPredicate candidate state.value
+  | .replace => sharedPredicate candidate 17
+
+public theorem sharedEnumMatch_spec (state : SharedState) (operation : SharedOperation)
+    (candidate : Nat) : sharedEnumMatch state operation candidate =
+      (candidate == match operation with
+        | .create | .replace => 17
+        | .inspect | .restore => state.value) := by
+  cases operation <;> rfl
+
+public def sharedEnumScalar (first second : Bool) (state candidate : Nat) : Bool :=
+  let operation := match first, second with
+    | false, false => SharedOperation.create
+    | false, true => SharedOperation.inspect
+    | true, false => SharedOperation.restore
+    | true, true => SharedOperation.replace
+  sharedEnumMatch ⟨state⟩ operation candidate
+
+public def largeNatReceiver (input : Nat) : Nat :=
+  let maximum := 4294967295
+  maximum - input
+
+public structure CapturedHolder where
+  apply : Nat → Nat
+
+public def escapingCapturedFunction (capture : Nat) : CapturedHolder :=
+  ⟨fun value => capture + value⟩
+
 end Conformance.BadRoots

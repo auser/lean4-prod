@@ -12,6 +12,7 @@ mkdir -p "$first" "$second"
 
 cd "$repo_root/lean"
 lake build Conformance.LexLean11 Conformance.BadRoots
+lake env lean Conformance/LocalFunctions.lean
 
 export_once() {
   local out=$1
@@ -78,6 +79,11 @@ expect_failure "root Conformance.BadRoots.typeValuedRoot does not generate code"
   lake exe prod-export --module Conformance.BadRoots \
     --root Conformance.BadRoots.typeValuedRoot --ir-module Bad --out "$scratch/bad"
 
+expect_failure "unsupported local function in Conformance.BadRoots.escapingCapturedFunction: Prod.LocalFunctionError.escaping" \
+  lake exe prod-export --module Conformance.BadRoots \
+    --root Conformance.BadRoots.escapingCapturedFunction \
+    --ir-module Bad --out "$scratch/bad"
+
 # The kernel body of a pattern-matching definition refers first to a generated
 # matcher. Named closure discovery must scan that internal helper so its public
 # callees are included, while keeping the matcher itself out of the public IR.
@@ -125,5 +131,28 @@ if grep -E -- '^pub fn (id|ProjectionLeft\.id|ProjectionRight\.id)\(' \
   echo "structure projection rendered as a free Rust function" >&2
   exit 1
 fi
+
+# First-order repeated enum alternatives must not become an unsupported
+# runtime closure solely because Lean shares two identical branch bodies.
+cd "$repo_root/lean"
+lake exe prod-export --module Conformance.BadRoots \
+  --root Conformance.BadRoots.largeNatReceiver \
+  --root Conformance.BadRoots.sharedEnumScalar \
+  --ir-module SharedEnum --out "$scratch/shared-enum"
+lake exe prod-export --module Conformance.BadRoots \
+  --root Conformance.BadRoots.largeNatReceiver \
+  --root Conformance.BadRoots.sharedEnumScalar \
+  --ir-module SharedEnum --out "$scratch/shared-enum-repeat"
+for artifact in kernel.ir roots.json coverage.json; do
+  cmp "$scratch/shared-enum/$artifact" "$scratch/shared-enum-repeat/$artifact"
+done
+cd "$repo_root/rust"
+cargo run -p prod-cli -- validate "$scratch/shared-enum/kernel.ir"
+cargo run -p prod-cli -- gen "$scratch/shared-enum/kernel.ir" \
+  --output "$scratch/shared-enum/generated.rs"
+cargo run -p prod-cli -- header "$scratch/shared-enum/kernel.ir" \
+  --output "$scratch/shared-enum/fixture.h" \
+  --rust-output "$scratch/shared-enum/ffi.rs"
+node "$repo_root/scripts/check-local-functions.mjs" "$scratch/shared-enum"
 
 echo "named-export conformance passed"

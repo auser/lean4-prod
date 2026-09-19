@@ -46,9 +46,9 @@
 //! shifts, and powers render as `checked_*(..).ok_or(crate::ComputeError::X)?`
 //! (with the shift/power exponent narrowed through
 //! `u32::try_from(..).map_err(..)?`). Subtraction saturates at zero (Lean Nat
-//! subtraction) and division/modulo by zero return zero (Lean Nat's total
-//! operations), so neither is fallible. There is no bignum fallback, so this
-//! is exact only while values fit in `u64`.
+//! subtraction); division by zero returns zero and remainder by zero returns
+//! the dividend (Lean Nat's total operations), so neither is fallible.
+//! There is no bignum fallback, so this is exact only while values fit in `u64`.
 //!
 //! A definition returns `Result<T, crate::ComputeError>` **only if it needs
 //! to**: if its body contains a checked operation, or calls a definition that
@@ -106,6 +106,9 @@ extern crate alloc;
 
 mod c_abi;
 mod core_wasm;
+mod joins;
+mod naming;
+mod ownership;
 mod package;
 mod sdk;
 mod text_view;
@@ -116,6 +119,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+use ownership::{expression_type, pattern_types, LocalTypes};
 use prod_ir::{Alt, CtorDecl, Definition, Expr, Module, Type, TypeDecl};
 
 pub use c_abi::{generate_c_bindings, CAbiError, CBindings};
@@ -163,6 +167,11 @@ pub enum Error {
     /// A join point that jumps to itself. Acyclic join points are duplicated
     /// at their call sites; cycles would need real control flow.
     UnsupportedJoinPoint(String),
+    /// Acyclic join expansion exceeds 65,536 expression nodes or 128 nested calls.
+    JoinExpansionLimit,
+    /// Two simultaneous parameters or pattern fields bind the same name.
+    /// Ordinary nested shadowing and sibling name reuse remain supported.
+    DuplicateBinding(String),
 }
 
 impl fmt::Display for Error {
@@ -209,7 +218,16 @@ impl fmt::Display for Error {
             }
             Error::UnsupportedJoinPoint(name) => write!(
                 f,
-                "join point `{}` has several callers or jumps to itself; only the single-caller form has a lowering",
+                "join point `{}` is cyclic or its argument count differs from its parameters",
+                name
+            ),
+            Error::JoinExpansionLimit => write!(
+                f,
+                "join expansion exceeds 65536 expression nodes or 128 nested calls per definition"
+            ),
+            Error::DuplicateBinding(name) => write!(
+                f,
+                "simultaneous parameters or pattern fields repeat binding `{}`",
                 name
             ),
         }
@@ -232,7 +250,7 @@ pub const REJECTIONS: &[(&str, &str)] = &[
     ),
     (
         "UnsupportedList",
-        "a list value outside a supported position: nested inside another type, or used as an intermediate value rather than a slice parameter/output buffer",
+        "a list value outside supported slice, output-buffer, constant or owned collection positions; computed eager jump arguments in builder/static mode require unsupported intermediate storage",
     ),
     (
         "HeapType",
@@ -272,7 +290,15 @@ pub const REJECTIONS: &[(&str, &str)] = &[
     ),
     (
         "UnsupportedJoinPoint",
-        "a join point with several callers, or one that jumps to itself; only the single-caller form, which inlines at its jump site, has a lowering",
+        "a cyclic join point or a jump whose argument count differs from its parameters; acyclic continuations are specialized before ownership analysis",
+    ),
+    (
+        "JoinExpansionLimit",
+        "acyclic join expansion exceeds 65536 expression nodes or 128 nested continuation calls per definition; checked before materialization, not an application memory or general IR-depth guarantee",
+    ),
+    (
+        "DuplicateBinding",
+        "simultaneous parameters or pattern fields repeat a name; nested shadowing and sibling name reuse remain supported",
     ),
 ];
 
@@ -573,12 +599,53 @@ fn is_fallible(expr: &Expr, shapes: &Signatures) -> bool {
     here || expr.children().any(|child| is_fallible(child, shapes))
 }
 
+/// Only closed, supported values can be discarded without evaluating them.
+/// Absence of ComputeError is not totality: calls can panic, and an unused
+/// unsupported expression must still fail code generation.
+fn discardable_value(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Nat(_) | Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Bytes(_)
+    ) || matches!(expr, Expr::Ctor(name, arguments) if name == "Prod.mk" && arguments.is_empty())
+}
+
 fn count_var_uses(expr: &Expr, name: &str) -> usize {
     let here = usize::from(matches!(expr, Expr::Var(candidate) if candidate == name));
     here + expr
         .children()
         .map(|child| count_var_uses(child, name))
         .sum::<usize>()
+}
+
+/// Alternatives are exclusive: a binder used once in either branch can still
+/// transfer its owner without a clone. Sequential uses remain additive.
+fn count_path_uses(expr: &Expr, name: &str) -> usize {
+    match expr {
+        Expr::If(condition, yes, no) => {
+            count_path_uses(condition, name)
+                + count_path_uses(yes, name).max(count_path_uses(no, name))
+        }
+        Expr::Match {
+            scrut,
+            alts,
+            default,
+        } => {
+            count_path_uses(scrut, name)
+                + alts
+                    .iter()
+                    .map(|alt| count_path_uses(&alt.body, name))
+                    .chain(default.iter().map(|value| count_path_uses(value, name)))
+                    .max()
+                    .unwrap_or(0)
+        }
+        _ => {
+            usize::from(matches!(expr, Expr::Var(candidate) if candidate == name))
+                + expr
+                    .children()
+                    .map(|child| count_path_uses(child, name))
+                    .sum::<usize>()
+        }
+    }
 }
 
 /// Whether a binding expression produces a known non-`Copy` Rust value.
@@ -666,31 +733,90 @@ fn repeated_non_copy_locals(
     table: &TypeTable<'_>,
     params: &[(String, Type)],
     returns_copy: bool,
+    borrowed_bindings: &BTreeSet<String>,
 ) -> BTreeSet<String> {
+    struct Context<'a, 'm> {
+        definitions: &'a [Definition],
+        table: &'a TypeTable<'m>,
+        parameters: &'a [(String, Type)],
+        borrowed_bindings: &'a BTreeSet<String>,
+    }
+
     fn walk(
         expr: &Expr,
-        definitions: &[Definition],
-        table: &TypeTable<'_>,
+        context: &Context<'_, '_>,
         non_copy_locals: &BTreeSet<String>,
+        local_types: &LocalTypes,
         output: &mut BTreeSet<String>,
     ) {
+        let Context {
+            definitions,
+            table,
+            parameters,
+            borrowed_bindings,
+        } = *context;
         match expr {
             Expr::Let(name, value, body) => {
-                walk(value, definitions, table, non_copy_locals, output);
+                walk(value, context, non_copy_locals, local_types, output);
                 let mut nested = non_copy_locals.clone();
-                if expression_is_non_copy(value, definitions, table, non_copy_locals) {
+                nested.remove(name);
+                let mut nested_types = local_types.clone();
+                let value_type =
+                    expression_type(value, definitions, table, local_types, parameters);
+                if let Some(ty) = value_type.clone() {
+                    nested_types.insert(name.clone(), ty);
+                } else {
+                    nested_types.remove(name);
+                }
+                if value_type
+                    .as_ref()
+                    .map(|ty| !copy_type(ty, table, &mut BTreeSet::new()))
+                    .unwrap_or_else(|| {
+                        expression_is_non_copy(value, definitions, table, non_copy_locals)
+                    })
+                {
                     nested.insert(name.clone());
-                    // Projections of non-Copy fields are already borrows and
-                    // may be reused without cloning the underlying value.
-                    if !matches!(value.as_ref(), Expr::Proj(..)) && count_var_uses(body, name) > 1 {
+                    // Borrowed projections can be shared; a moved field is
+                    // an owned local and needs the usual reuse protection.
+                    if !borrowed_bindings.contains(name)
+                        && count_path_uses(body, name) > 1
+                        && !single_owned_option_match(name, value, body, definitions, table)
+                    {
                         output.insert(name.clone());
                     }
                 }
-                walk(body, definitions, table, &nested, output);
+                walk(body, context, &nested, &nested_types, output);
             }
-            Expr::Match { .. } => {
-                for child in expr.children() {
-                    walk(child, definitions, table, non_copy_locals, output);
+            Expr::Match {
+                scrut,
+                alts,
+                default,
+            } => {
+                walk(scrut, context, non_copy_locals, local_types, output);
+                let scrutinee_type =
+                    expression_type(scrut, definitions, table, local_types, parameters);
+                for alt in alts {
+                    let mut nested = non_copy_locals.clone();
+                    let mut nested_types = local_types.clone();
+                    for name in &alt.binders {
+                        nested.remove(name);
+                        nested_types.remove(name);
+                    }
+                    for (name, ty) in pattern_types(scrutinee_type.as_ref(), alt, table) {
+                        if !copy_type(&ty, table, &mut BTreeSet::new()) {
+                            nested.insert(name.clone());
+                            if !borrowed_bindings.contains(&name)
+                                && count_path_uses(&alt.body, &name) > 1
+                            {
+                                output.insert(name.clone());
+                            }
+                        }
+                        nested_types.insert(name, ty);
+                    }
+                    walk(&alt.body, context, &nested, &nested_types, output);
+                }
+                if let Some(default) = default {
+                    walk(default, context, non_copy_locals, local_types, output);
                 }
             }
             Expr::Jp {
@@ -699,15 +825,15 @@ fn repeated_non_copy_locals(
                 ..
             } => {
                 for parameter in join_params {
-                    if count_var_uses(body, parameter) > 1 {
+                    if count_path_uses(body, parameter) > 1 {
                         output.insert(parameter.clone());
                     }
                 }
-                walk(body, definitions, table, non_copy_locals, output);
+                walk(body, context, non_copy_locals, local_types, output);
             }
             _ => {
                 for child in expr.children() {
-                    walk(child, definitions, table, non_copy_locals, output);
+                    walk(child, context, non_copy_locals, local_types, output);
                 }
             }
         }
@@ -717,12 +843,24 @@ fn repeated_non_copy_locals(
     for (name, ty) in params {
         if !internal_borrowed_parameter(ty, table, returns_copy)
             && !copy_type(ty, table, &mut BTreeSet::new())
-            && count_var_uses(expr, name) > 1
+            && count_path_uses(expr, name) > 1
         {
             output.insert(name.clone());
         }
     }
-    walk(expr, definitions, table, &BTreeSet::new(), &mut output);
+    let context = Context {
+        definitions,
+        table,
+        parameters: params,
+        borrowed_bindings,
+    };
+    walk(
+        expr,
+        &context,
+        &BTreeSet::new(),
+        &params.iter().cloned().collect(),
+        &mut output,
+    );
     output
 }
 
@@ -756,6 +894,63 @@ fn inline_bindings(expr: &Expr) -> BTreeMap<String, &Expr> {
     output
 }
 
+/// Owners used exclusively through distinct field projections can be partially
+/// moved. Names must already be lexically normalized. Any whole-owner use,
+/// repeated field, or join point retains the conservative borrowing policy.
+fn movable_projection_owners(definition: &Definition, table: &TypeTable<'_>) -> BTreeSet<String> {
+    fn walk(
+        expr: &Expr,
+        fields: &mut BTreeMap<String, BTreeSet<String>>,
+        retained: &mut BTreeSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::Proj(_, field, owner) => {
+                if let Expr::Var(name) = owner.as_ref() {
+                    if !fields
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(field.clone())
+                    {
+                        retained.insert(name.clone());
+                    }
+                    true
+                } else {
+                    walk(owner, fields, retained)
+                }
+            }
+            Expr::Var(name) => {
+                retained.insert(name.clone());
+                true
+            }
+            // Join-point bodies may be substituted into another lexical
+            // context. This pass deliberately does not model that ownership.
+            Expr::Jp { .. } | Expr::Jmp { .. } => false,
+            _ => expr
+                .children()
+                .into_iter()
+                .all(|child| walk(child, fields, retained)),
+        }
+    }
+    if returns_borrowed_projection(definition, table) {
+        return BTreeSet::new();
+    }
+    let mut fields = BTreeMap::new();
+    let mut retained = BTreeSet::new();
+    if !walk(&definition.body, &mut fields, &mut retained) {
+        return BTreeSet::new();
+    }
+    fields
+        .into_keys()
+        .filter(|name| !retained.contains(name))
+        .collect()
+}
+
+fn projection_moves(expr: &Expr, locals: &BTreeSet<String>, movable: &BTreeSet<String>) -> bool {
+    matches!(expr, Expr::Proj(_, _, owner)
+        if matches!(owner.as_ref(), Expr::Var(name)
+            if movable.contains(name) && !locals.contains(name)))
+}
+
 /// Whether value-mode rendering borrows an existing owner. This is separate
 /// from non-Copy analysis: an owned constructor must copy a borrowed field even
 /// when it uses that field only once, while predicates must keep borrowing.
@@ -764,96 +959,274 @@ fn expression_is_borrowed(
     definitions: &[Definition],
     table: &TypeTable<'_>,
     locals: &BTreeSet<String>,
+    movable: &BTreeSet<String>,
 ) -> bool {
     match expr {
         Expr::Var(name) => locals.contains(name),
-        Expr::Proj(..) => expression_is_non_copy(expr, definitions, table, &BTreeSet::new()),
+        Expr::Proj(..) => {
+            !projection_moves(expr, locals, movable)
+                && expression_is_non_copy(expr, definitions, table, &BTreeSet::new())
+        }
         Expr::Call(name, _) => definitions
             .iter()
             .find(|definition| definition.name == *name)
             .is_some_and(|definition| {
-                returns_borrowed_projection(&definition.body, &definition.ret, table)
+                returns_borrowed_projection(definition, table)
                     || definition.params.is_empty() && matches!(definition.ret, Type::List(_))
             }),
-        Expr::Let(_, _, body) => expression_is_borrowed(body, definitions, table, locals),
+        Expr::Let(_, _, body) => expression_is_borrowed(body, definitions, table, locals, movable),
         Expr::If(_, then_value, else_value) => {
-            expression_is_borrowed(then_value, definitions, table, locals)
-                && expression_is_borrowed(else_value, definitions, table, locals)
+            expression_is_borrowed(then_value, definitions, table, locals, movable)
+                && expression_is_borrowed(else_value, definitions, table, locals, movable)
         }
         Expr::Match { alts, default, .. } => {
             (!alts.is_empty() || default.is_some())
-                && alts
-                    .iter()
-                    .all(|alt| expression_is_borrowed(&alt.body, definitions, table, locals))
-                && default
-                    .as_ref()
-                    .is_none_or(|value| expression_is_borrowed(value, definitions, table, locals))
+                && alts.iter().all(|alt| {
+                    expression_is_borrowed(&alt.body, definitions, table, locals, movable)
+                })
+                && default.as_ref().is_none_or(|value| {
+                    expression_is_borrowed(value, definitions, table, locals, movable)
+                })
         }
         _ => false,
     }
 }
 
-fn borrowed_locals(
+fn list_head_rebound_by_value(
+    scrutinee: &Expr,
+    params: &[(String, Type)],
+    table: &TypeTable<'_>,
+) -> bool {
+    // Known non-Copy parameter heads stay borrowed. Other heads retain the
+    // renderer's existing clone/rebind, including unknown nested/alias types;
+    // `true` means rebound, not a claim that an unknown element is Copy.
+    let Expr::Var(name) = scrutinee else {
+        return true;
+    };
+    params
+        .iter()
+        .find_map(|(parameter, ty)| {
+            (parameter == name).then_some(ty).and_then(|ty| match ty {
+                Type::List(element) => Some(copy_type(element, table, &mut BTreeSet::new())),
+                _ => None,
+            })
+        })
+        .unwrap_or(true)
+}
+
+#[derive(Default)]
+struct BindingOwnership {
+    borrowed: BTreeSet<String>,
+    copied_patterns: BTreeSet<String>,
+}
+
+fn binding_ownership(
     definition: &Definition,
     definitions: &[Definition],
     table: &TypeTable<'_>,
-) -> BTreeSet<String> {
+    movable: &BTreeSet<String>,
+) -> BindingOwnership {
     fn walk(
         expr: &Expr,
         definitions: &[Definition],
         table: &TypeTable<'_>,
-        locals: &mut BTreeSet<String>,
+        params: &[(String, Type)],
+        local_types: &LocalTypes,
+        locals: &mut BindingOwnership,
+        movable: &BTreeSet<String>,
     ) {
         match expr {
             Expr::Let(name, value, body) => {
-                walk(value, definitions, table, locals);
-                if expression_is_borrowed(value, definitions, table, locals) {
-                    locals.insert(name.clone());
+                walk(
+                    value,
+                    definitions,
+                    table,
+                    params,
+                    local_types,
+                    locals,
+                    movable,
+                );
+                let mut nested_types = local_types.clone();
+                if let Some(ty) = expression_type(value, definitions, table, local_types, params) {
+                    nested_types.insert(name.clone(), ty);
+                } else {
+                    nested_types.remove(name);
                 }
-                walk(body, definitions, table, locals);
+                if expression_is_borrowed(value, definitions, table, &locals.borrowed, movable) {
+                    locals.borrowed.insert(name.clone());
+                }
+                walk(
+                    body,
+                    definitions,
+                    table,
+                    params,
+                    &nested_types,
+                    locals,
+                    movable,
+                );
             }
             Expr::Match {
                 scrut,
                 alts,
                 default,
             } => {
-                walk(scrut, definitions, table, locals);
-                let borrowed = expression_is_borrowed(scrut, definitions, table, locals);
+                walk(
+                    scrut,
+                    definitions,
+                    table,
+                    params,
+                    local_types,
+                    locals,
+                    movable,
+                );
+                let borrowed =
+                    expression_is_borrowed(scrut, definitions, table, &locals.borrowed, movable);
+                let scrutinee_type =
+                    expression_type(scrut, definitions, table, local_types, params);
                 for alt in alts {
+                    let fields = pattern_types(scrutinee_type.as_ref(), alt, table);
+                    let mut nested_types = local_types.clone();
+                    for name in &alt.binders {
+                        nested_types.remove(name);
+                    }
+                    nested_types.extend(fields.clone());
+                    if alt.ctor == "List.cons" && alt.binders.len() == 2 {
+                        // Slice patterns always borrow their tail. Keep the
+                        // head classification identical to render_match's
+                        // optional by-value rebind, including nested matches.
+                        locals.borrowed.insert(alt.binders[1].clone());
+                        if !list_head_rebound_by_value(scrut, params, table) {
+                            locals.borrowed.insert(alt.binders[0].clone());
+                        }
+                    }
                     if borrowed {
+                        if alt.ctor != "List.cons" {
+                            for (name, ty) in &fields {
+                                if copy_type(ty, table, &mut BTreeSet::new()) {
+                                    // Builtin patterns use match ergonomics too.
+                                    // Record positive typed evidence for their
+                                    // by-value rebind; an unknown type is not Copy.
+                                    locals.copied_patterns.insert(name.clone());
+                                } else {
+                                    locals.borrowed.insert(name.clone());
+                                }
+                            }
+                        }
                         if let Some(constructor) = table.values().find_map(|declaration| {
                             declaration.ctors.iter().find(|row| row.name == alt.ctor)
                         }) {
                             for ((_, ty), binder) in constructor.fields.iter().zip(&alt.binders) {
                                 // Copy fields are rebound by value in render_match.
                                 if !copy_type(ty, table, &mut BTreeSet::new()) {
-                                    locals.insert(binder.clone());
+                                    locals.borrowed.insert(binder.clone());
                                 }
                             }
                         }
                     }
-                    walk(&alt.body, definitions, table, locals);
+                    walk(
+                        &alt.body,
+                        definitions,
+                        table,
+                        params,
+                        &nested_types,
+                        locals,
+                        movable,
+                    );
                 }
                 if let Some(default) = default {
-                    walk(default, definitions, table, locals);
+                    walk(
+                        default,
+                        definitions,
+                        table,
+                        params,
+                        local_types,
+                        locals,
+                        movable,
+                    );
                 }
             }
             _ => {
                 for child in expr.children() {
-                    walk(child, definitions, table, locals);
+                    walk(
+                        child,
+                        definitions,
+                        table,
+                        params,
+                        local_types,
+                        locals,
+                        movable,
+                    );
                 }
             }
         }
     }
     let returns_copy = copy_type(&definition.ret, table, &mut BTreeSet::new());
-    let mut locals = definition
-        .params
-        .iter()
-        .filter(|(_, ty)| internal_borrowed_parameter(ty, table, returns_copy))
-        .map(|(name, _)| name.clone())
-        .collect();
-    walk(&definition.body, definitions, table, &mut locals);
+    let mut locals = BindingOwnership {
+        borrowed: definition
+            .params
+            .iter()
+            .filter(|(_, ty)| internal_borrowed_parameter(ty, table, returns_copy))
+            .map(|(name, _)| name.clone())
+            .collect(),
+        copied_patterns: BTreeSet::new(),
+    };
+    walk(
+        &definition.body,
+        definitions,
+        table,
+        &definition.params,
+        &definition.params.iter().cloned().collect(),
+        &mut locals,
+        movable,
+    );
     locals
+}
+
+/// Matching None does not move a payload, so that arm can return the original
+/// Option without cloning the Some payload. Keep the original typed expression
+/// intact: replacing the return with an untyped None can lose type inference.
+/// Any other use of the owner retains the existing conservative clone policy.
+fn single_owned_option_match(
+    name: &str,
+    value: &Expr,
+    body: &Expr,
+    definitions: &[Definition],
+    table: &TypeTable<'_>,
+) -> bool {
+    let Expr::Call(callee, _) = value else {
+        return false;
+    };
+    if !definitions.iter().any(|definition| {
+        definition.name == *callee
+            && matches!(definition.ret, Type::Option(_))
+            && !returns_borrowed_projection(definition, table)
+    }) {
+        return false;
+    }
+    let Expr::Match {
+        scrut,
+        alts,
+        default,
+    } = body
+    else {
+        return false;
+    };
+    if !matches!(scrut.as_ref(), Expr::Var(scrutinee) if scrutinee == name)
+        || default.is_some()
+        || alts.len() != 2
+        || !alts.iter().any(|alt| {
+            alt.ctor == "Option.some"
+                && alt.binders.len() == 1
+                && count_var_uses(&alt.body, name) == 0
+        })
+    {
+        return false;
+    }
+    alts.iter().any(|alt| {
+        alt.ctor == "Option.none"
+            && alt.binders.is_empty()
+            && matches!(&alt.body, Expr::Var(returned) if returned == name)
+    })
 }
 
 fn generate_def_in<'m>(
@@ -862,6 +1235,29 @@ fn generate_def_in<'m>(
     shapes: &Signatures<'m>,
     table: &TypeTable<'m>,
 ) -> Result<String, Error> {
+    // Ownership and inline-value tables are keyed by local name. Preserve
+    // lexical scopes at the public IR boundary before building those tables.
+    let normalized = naming::normalize_definition(
+        def,
+        &|name| emitted_call_name(name, definitions, table),
+        table,
+    )?;
+    let (normalized, eager_bindings) = if let Some(expanded) = joins::expand(&normalized)? {
+        let join_parameters = JpContext::collect(&normalized.body)
+            .decls
+            .values()
+            .flat_map(|(parameters, _)| parameters.iter().cloned())
+            .collect();
+        naming::normalize_tracking(
+            &expanded,
+            &|name| emitted_call_name(name, definitions, table),
+            table,
+            &join_parameters,
+        )?
+    } else {
+        (normalized, BTreeSet::new())
+    };
+    let def = &normalized;
     let shape = shapes
         .get(def.name.as_str())
         .copied()
@@ -874,6 +1270,8 @@ fn generate_def_in<'m>(
         def.name.clone()
     };
     let visibility = if helper { "" } else { "pub " };
+    let movable_projections = movable_projection_owners(def, table);
+    let bindings = binding_ownership(def, definitions, table, &movable_projections);
     let renderer = Renderer {
         shapes,
         definitions,
@@ -886,9 +1284,13 @@ fn generate_def_in<'m>(
             table,
             &def.params,
             returns_copy,
+            &bindings.borrowed,
         ),
         inline_values: inline_bindings(&def.body),
-        borrowed_locals: borrowed_locals(def, definitions, table),
+        borrowed_locals: bindings.borrowed,
+        copied_patterns: bindings.copied_patterns,
+        movable_projections,
+        eager_bindings,
     };
 
     let mut params = String::new();
@@ -907,7 +1309,8 @@ fn generate_def_in<'m>(
         ));
     }
     check_named_type(&def.ret, table)?;
-    let return_type = if returns_borrowed_projection(&def.body, &def.ret, table) {
+    let borrowed_return = returns_borrowed_projection(def, table);
+    let return_type = if borrowed_return {
         format!("&{}", type_to_rust(&def.ret)?)
     } else {
         type_to_rust(&def.ret)?
@@ -955,14 +1358,14 @@ fn generate_def_in<'m>(
             generated_name,
             params,
             return_type,
-            renderer.value(&def.body)?
+            renderer.render_return(&def.body, borrowed_return)?
         )),
         Shape::Value => Ok(format!(
             "{visibility}fn {}({}) -> {} {{\n    {}\n}}\n",
             generated_name,
             params,
             return_type,
-            renderer.value(&def.body)?
+            renderer.render_return(&def.body, borrowed_return)?
         )),
     }?;
 
@@ -1010,17 +1413,37 @@ fn generate_def_in<'m>(
 
 /// Whether a definition is the compiler-generated shape of an accessor for a
 /// non-`Copy` field. Returning a borrow preserves the source value without a
-/// clone (and therefore without a possible allocation).
-fn returns_borrowed_projection(expr: &Expr, ret: &Type, table: &TypeTable) -> bool {
-    let Expr::Let(name, value, body) = expr else {
+/// clone (and therefore without a possible allocation). The receiver must be
+/// the unique borrowed input, so its storage outlives the call and ordinary
+/// Rust lifetime elision binds the result to that input unambiguously.
+fn returns_borrowed_projection(definition: &Definition, table: &TypeTable) -> bool {
+    let Expr::Let(name, value, body) = &definition.body else {
         return false;
     };
     if !matches!(body.as_ref(), Expr::Var(result) if result == name) {
         return false;
     }
-    let Expr::Proj(owner, field, _) = value.as_ref() else {
+    let Expr::Proj(owner, field, receiver) = value.as_ref() else {
         return false;
     };
+    let parameter = match receiver.as_ref() {
+        Expr::Var(name) => definition
+            .params
+            .iter()
+            .find(|(parameter, _)| parameter == name),
+        Expr::Param(index) => definition.params.get(*index),
+        _ => None,
+    };
+    if !matches!(parameter, Some((_, Type::Named(name))) if name == owner)
+        || definition
+            .params
+            .iter()
+            .filter(|(_, ty)| internal_borrowed_parameter(ty, table, false))
+            .count()
+            != 1
+    {
+        return false;
+    }
     table
         .get(owner.as_str())
         .and_then(|declaration| {
@@ -1031,7 +1454,7 @@ fn returns_borrowed_projection(expr: &Expr, ret: &Type, table: &TypeTable) -> bo
                 .find_map(|(name, ty)| (name == field).then_some(ty))
         })
         .is_some_and(|field_type| {
-            field_type == ret && !copy_type(field_type, table, &mut BTreeSet::new())
+            field_type == &definition.ret && !copy_type(field_type, table, &mut BTreeSet::new())
         })
 }
 
@@ -1123,6 +1546,15 @@ fn borrowed_helper_name(definition: &Definition, definitions: &[Definition]) -> 
         candidate.push('_');
     }
     candidate
+}
+
+fn emitted_call_name(name: &str, definitions: &[Definition], table: &TypeTable<'_>) -> String {
+    definitions
+        .iter()
+        .find(|definition| definition.name == name)
+        .filter(|definition| needs_borrowed_helper(definition, table))
+        .map(|definition| borrowed_helper_name(definition, definitions))
+        .unwrap_or_else(|| String::from(name))
 }
 
 /// A `(named ...)` type occurring in a definition's signature must be
@@ -1238,6 +1670,9 @@ enum Mode<'x, 'm> {
     /// Ordinary value position. The rendered text has the expression's own
     /// Rust type, with `?` embedded wherever an operation can fail.
     Value,
+    /// An owned ABI boundary. Convert borrowed results inside each lexical
+    /// scope, before any branch-local owners are dropped.
+    OwnedValue,
     /// List builder position. The rendered text has type
     /// `Result<usize, crate::ComputeError>` and fills `out`.
     Builder {
@@ -1271,16 +1706,54 @@ struct Renderer<'s, 'm> {
     inline_values: BTreeMap<String, &'m Expr>,
     /// Locals that borrow a field/parameter rather than owning its value.
     borrowed_locals: BTreeSet<String>,
+    copied_patterns: BTreeSet<String>,
+    /// Syntactically single-use fields; actual movement also requires an owned receiver.
+    movable_projections: BTreeSet<String>,
+    /// Expanded jump arguments are eager even when a list builder would
+    /// otherwise defer ordinary list bindings into its symbolic environment.
+    eager_bindings: BTreeSet<String>,
 }
 
 impl<'m> Renderer<'_, 'm> {
+    fn borrows(&self, expr: &Expr) -> bool {
+        expression_is_borrowed(
+            expr,
+            self.definitions,
+            self.types,
+            &self.borrowed_locals,
+            &self.movable_projections,
+        )
+    }
+
     fn value(&self, expr: &'m Expr) -> Result<String, Error> {
         self.render(expr, &Mode::Value)
     }
 
+    /// A read-only operand does not consume a local even when other uses do.
+    /// Cloning here can copy an entire parser record merely to read one field.
+    /// Non-local expressions retain ordinary evaluation and ownership rules.
+    fn read_value(&self, expr: &'m Expr) -> Result<String, Error> {
+        match self.resolved_inline(expr) {
+            Expr::Var(name) => Ok(rust_local_ident(name)),
+            other => self.value(other),
+        }
+    }
+
     fn owned_value(&self, expr: &'m Expr) -> Result<String, Error> {
+        self.render(expr, &Mode::OwnedValue)
+    }
+
+    fn render_return(&self, expr: &'m Expr, borrowed: bool) -> Result<String, Error> {
+        if borrowed {
+            self.value(expr)
+        } else {
+            self.owned_value(expr)
+        }
+    }
+
+    fn owned_leaf(&self, expr: &'m Expr) -> Result<String, Error> {
         let rendered = self.value(expr)?;
-        if expression_is_borrowed(expr, self.definitions, self.types, &self.borrowed_locals) {
+        if self.borrows(expr) {
             // Use the fully qualified alloc trait: generated no_std modules
             // need no extra imports. This also turns borrowed str/slices into
             // their owned String/Vec representation at this owned boundary.
@@ -1288,6 +1761,33 @@ impl<'m> Renderer<'_, 'm> {
         } else {
             Ok(rendered)
         }
+    }
+
+    fn parse_decimal(&self, value: &'m Expr, target: Option<&Type>) -> Result<String, Error> {
+        let parse = match target {
+            None => String::from("parse()"),
+            Some(
+                ty @ (Type::Int8
+                | Type::Int16
+                | Type::Int32
+                | Type::Int64
+                | Type::UInt8
+                | Type::UInt16
+                | Type::UInt32
+                | Type::UInt64),
+            ) => {
+                format!("parse::<{}>()", type_to_rust(ty)?)
+            }
+            Some(Type::Int) => return Err(Error::UnboundedInt),
+            Some(ty) => return Err(Error::OpaqueType(format!("parse-decimal-as target {ty:?}"))),
+        };
+        // Retain an owned temporary for the whole parse while borrowing an
+        // exact str view of String, &String, or &str. The explicit target on
+        // new IR prevents Rust inference from changing the source width.
+        Ok(format!(
+            "{{ let __input = &({}); let __text: &str = core::convert::AsRef::<str>::as_ref(__input); __text.{parse}.ok().filter(|__value| alloc::string::ToString::to_string(__value) == __text) }}",
+            self.read_value(value)?
+        ))
     }
 
     fn resolved_inline(&self, expr: &'m Expr) -> &'m Expr {
@@ -1311,21 +1811,8 @@ impl<'m> Renderer<'_, 'm> {
         }
     }
 
-    fn list_head_is_copy(&self, scrutinee: &Expr) -> bool {
-        let Expr::Var(name) = scrutinee else {
-            return true;
-        };
-        self.params
-            .iter()
-            .find_map(|(parameter, ty)| {
-                (parameter == name).then_some(ty).and_then(|ty| match ty {
-                    Type::List(element) => {
-                        Some(copy_type(element, self.types, &mut BTreeSet::new()))
-                    }
-                    _ => None,
-                })
-            })
-            .unwrap_or(true)
+    fn list_head_rebound_by_value(&self, scrutinee: &Expr) -> bool {
+        list_head_rebound_by_value(scrutinee, self.params, self.types)
     }
 
     /// The declaration of a constructor, by its full Lean name.
@@ -1392,11 +1879,11 @@ impl<'m> Renderer<'_, 'm> {
                         Ok(format!("&{value:?}"))
                     }
                     Some((Type::String | Type::Bytes, true)) => {
-                        let rendered = self.value(argument)?;
+                        let rendered = self.read_value(argument)?;
                         Ok(format!("({rendered}).as_ref()"))
                     }
                     Some((_, true)) => {
-                        let rendered = self.value(argument)?;
+                        let rendered = self.read_value(argument)?;
                         Ok(format!("&({rendered})"))
                     }
                     Some((_, false)) => self.owned_value(argument),
@@ -1407,12 +1894,7 @@ impl<'m> Renderer<'_, 'm> {
     }
 
     fn call_name(&self, name: &str) -> String {
-        self.definitions
-            .iter()
-            .find(|definition| definition.name == name)
-            .filter(|definition| needs_borrowed_helper(definition, self.types))
-            .map(|definition| borrowed_helper_name(definition, self.definitions))
-            .unwrap_or_else(|| String::from(name))
+        emitted_call_name(name, self.definitions, self.types)
     }
 
     /// Is this expression a list value (and therefore only renderable in
@@ -1438,22 +1920,161 @@ impl<'m> Renderer<'_, 'm> {
         }
     }
 
+    fn reject_eager_list_binding(
+        &self,
+        name: &str,
+        value: &'m Expr,
+        env: &[(&'m str, &'m Expr)],
+    ) -> Result<(), Error> {
+        if !self.eager_bindings.contains(name) {
+            return Ok(());
+        }
+        // Jumps were not supported in builder/static-list positions before
+        // ownership specialization. Do not silently add allocating storage or
+        // defer a computed argument into the allocation-free builder's env.
+        fn closed_list(value: &Expr) -> bool {
+            match value {
+                Expr::Ctor(name, fields) if name == "List.nil" => fields.is_empty(),
+                Expr::Ctor(name, fields) if name == "List.cons" && fields.len() == 2 => {
+                    discardable_value(&fields[0]) && closed_list(&fields[1])
+                }
+                _ => false,
+            }
+        }
+        fn list_result<'m>(
+            renderer: &Renderer<'_, 'm>,
+            value: &'m Expr,
+            env: &[(&'m str, &'m Expr)],
+            locals: &LocalTypes,
+            possible_lists: &BTreeSet<String>,
+        ) -> bool {
+            if matches!(value, Expr::Var(name) if possible_lists.contains(name)) {
+                return true;
+            }
+            if renderer.is_list_valued(value, env) {
+                return true;
+            }
+            let value_type = expression_type(
+                value,
+                renderer.definitions,
+                renderer.types,
+                locals,
+                renderer.params,
+            );
+            if matches!(value_type, Some(Type::List(_))) {
+                return true;
+            }
+            match value {
+                Expr::Append(left, _) => list_result(renderer, left, env, locals, possible_lists),
+                // In these previously unsupported builder jump positions,
+                // unknown aliases cannot justify intermediate storage.
+                Expr::Var(_) => value_type.is_none(),
+                Expr::If(_, yes, no) => {
+                    list_result(renderer, yes, env, locals, possible_lists)
+                        || list_result(renderer, no, env, locals, possible_lists)
+                }
+                Expr::Let(name, bound, body) => {
+                    let mut nested = env.to_vec();
+                    let mut nested_types = locals.clone();
+                    let mut nested_lists = possible_lists.clone();
+                    if let Some(ty) = expression_type(
+                        bound,
+                        renderer.definitions,
+                        renderer.types,
+                        locals,
+                        renderer.params,
+                    ) {
+                        nested_types.insert(name.clone(), ty);
+                    } else {
+                        nested_types.remove(name);
+                    }
+                    if list_result(renderer, bound, env, locals, possible_lists) {
+                        nested.push((name, bound));
+                        nested_lists.insert(name.clone());
+                    } else {
+                        nested_lists.remove(name);
+                    }
+                    list_result(renderer, body, &nested, &nested_types, &nested_lists)
+                }
+                Expr::Match {
+                    scrut,
+                    alts,
+                    default,
+                } => {
+                    let scrutinee_type = expression_type(
+                        scrut,
+                        renderer.definitions,
+                        renderer.types,
+                        locals,
+                        renderer.params,
+                    );
+                    alts.iter().any(|alt| {
+                        let fields = pattern_types(scrutinee_type.as_ref(), alt, renderer.types);
+                        let mut nested_types = locals.clone();
+                        let mut nested_lists = possible_lists.clone();
+                        for binder in &alt.binders {
+                            match fields.get(binder) {
+                                Some(ty) => {
+                                    nested_types.insert(binder.clone(), ty.clone());
+                                    if matches!(ty, Type::List(_)) {
+                                        nested_lists.insert(binder.clone());
+                                    } else {
+                                        nested_lists.remove(binder);
+                                    }
+                                }
+                                None => {
+                                    nested_types.remove(binder);
+                                    // Unknown pattern values cannot justify
+                                    // introducing intermediate list storage.
+                                    nested_lists.insert(binder.clone());
+                                }
+                            }
+                        }
+                        list_result(renderer, &alt.body, env, &nested_types, &nested_lists)
+                    }) || default.as_deref().is_some_and(|value| {
+                        list_result(renderer, value, env, locals, possible_lists)
+                    })
+                }
+                _ => false,
+            }
+        }
+        let value = self.resolved_inline(value);
+        let mut locals: LocalTypes = self.params.iter().cloned().collect();
+        let mut possible_lists = BTreeSet::new();
+        for (name, bound) in env {
+            if let Some(ty) =
+                expression_type(bound, self.definitions, self.types, &locals, self.params)
+            {
+                locals.insert(String::from(*name), ty);
+            }
+            if self.is_list_valued(bound, env) {
+                possible_lists.insert(String::from(*name));
+            }
+        }
+        if list_result(self, value, env, &locals, &possible_lists) && !closed_list(value) {
+            // Validate its supported expression forms before reporting the
+            // storage boundary; opaque/extern arguments must never disappear.
+            self.value(value)?;
+            return Err(Error::UnsupportedList(String::from(
+                "computed eager jump arguments require list storage in builder/static mode",
+            )));
+        }
+        Ok(())
+    }
+
     fn render(&self, expr: &'m Expr, mode: &Mode<'_, 'm>) -> Result<String, Error> {
+        if matches!(mode, Mode::OwnedValue)
+            && !matches!(expr, Expr::Let(..) | Expr::If(..) | Expr::Match { .. })
+        {
+            return self.owned_leaf(expr);
+        }
+        if let (Expr::Let(name, value, _), Mode::Builder { env, .. }) = (expr, mode) {
+            self.reject_eager_list_binding(name, value, env)?;
+        }
         match expr {
             // ---- control flow: identical in both modes ----
             Expr::If(cond, t, f)
-                if matches!(mode, Mode::Value)
-                    && expression_is_borrowed(
-                        t,
-                        self.definitions,
-                        self.types,
-                        &self.borrowed_locals,
-                    ) != expression_is_borrowed(
-                        f,
-                        self.definitions,
-                        self.types,
-                        &self.borrowed_locals,
-                    ) =>
+                if matches!(mode, Mode::Value) && self.borrows(t) != self.borrows(f) =>
             {
                 // Rust branches must agree on ownership. Keep a borrowed
                 // result when both arms borrow; a mixed result owns both arms.
@@ -1474,8 +2095,7 @@ impl<'m> Renderer<'_, 'm> {
                 self.render(body, mode)
             }
             Expr::Let(name, value, body)
-                if count_var_uses(body, name) == 0
-                    && !matches!(value.as_ref(), Expr::Jp { .. }) =>
+                if count_var_uses(body, name) == 0 && discardable_value(value) =>
             {
                 self.render(body, mode)
             }
@@ -1513,20 +2133,27 @@ impl<'m> Renderer<'_, 'm> {
                 // constrains neither type parameter on its own, and it can
                 // appear under a `?` (as the tail of a cons).
                 Mode::Builder { .. } => Ok(String::from("Ok::<usize, crate::ComputeError>(0)")),
-                Mode::Value => Ok(String::from("alloc::vec::Vec::new()")),
+                Mode::Value | Mode::OwnedValue => Ok(String::from("alloc::vec::Vec::new()")),
             },
             Expr::Ctor(name, args) if name == "List.cons" && args.len() == 2 => match mode {
                 Mode::Builder { out, env, depth } => {
                     self.render_cons(&args[0], &args[1], out, env, *depth)
                 }
-                Mode::Value if self.is_empty_list(&args[1]) => {
-                    Ok(format!("alloc::vec![{}]", self.value(&args[0])?))
+                Mode::Value | Mode::OwnedValue if self.is_empty_list(&args[1]) => {
+                    Ok(format!("alloc::vec![{}]", self.owned_value(&args[0])?))
                 }
-                Mode::Value => Ok(format!(
-                    "{{ let mut __list = alloc::vec![{}]; __list.extend({}); __list }}",
-                    self.value(&args[0])?,
-                    self.value(&args[1])?
-                )),
+                Mode::Value | Mode::OwnedValue => {
+                    // Evaluate the head before the tail, then reuse the owned
+                    // tail's capacity. Exact growth avoids doubling a full tail
+                    // under the Wasm bump allocator. Tuple initialization keeps
+                    // both operands outside the temporary's scope and preserves
+                    // error order.
+                    Ok(format!(
+                        "{{ let mut __list = ({}, {}); __list.1.reserve_exact(1); __list.1.insert(0, __list.0); __list.1 }}",
+                        self.owned_value(&args[0])?,
+                        self.owned_value(&args[1])?
+                    ))
+                }
             },
 
             // ---- everything else ----
@@ -1550,12 +2177,12 @@ impl<'m> Renderer<'_, 'm> {
                         name
                     ))),
                 },
-                Mode::Value
+                Mode::Value | Mode::OwnedValue
                     if self.clone_locals.contains(name) && !self.borrowed_locals.contains(name) =>
                 {
                     Ok(format!("{}.clone()", rust_local_ident(name)))
                 }
-                Mode::Value => Ok(rust_local_ident(name)),
+                Mode::Value | Mode::OwnedValue => Ok(rust_local_ident(name)),
             },
             Expr::Call(name, args) => {
                 let rendered = self.render_call_args(name, args)?;
@@ -1572,14 +2199,18 @@ impl<'m> Renderer<'_, 'm> {
                         "`{}` does not build its list into a caller buffer",
                         name
                     ))),
-                    (Mode::Value, Some(Shape::Buffer)) => Err(Error::UnsupportedList(format!(
+                    (Mode::Value | Mode::OwnedValue, Some(Shape::Buffer)) => {
+                        Err(Error::UnsupportedList(format!(
                         "`{}` returns a list; its result cannot be used as an intermediate value",
                         name
-                    ))),
-                    (Mode::Value, Some(Shape::Fallible)) => {
+                    )))
+                    }
+                    (Mode::Value | Mode::OwnedValue, Some(Shape::Fallible)) => {
                         Ok(format!("{}({})?", call_name, rendered.join(", ")))
                     }
-                    (Mode::Value, _) => Ok(format!("{}({})", call_name, rendered.join(", "))),
+                    (Mode::Value | Mode::OwnedValue, _) => {
+                        Ok(format!("{}({})", call_name, rendered.join(", ")))
+                    }
                 }
             }
 
@@ -1614,7 +2245,7 @@ impl<'m> Renderer<'_, 'm> {
                 Mode::Builder { .. } => Err(Error::UnsupportedList(
                     "expression does not build a list".to_string(),
                 )),
-                Mode::Value => self.render_value_leaf(expr),
+                Mode::Value | Mode::OwnedValue => self.render_value_leaf(expr),
             },
         }
     }
@@ -1679,46 +2310,47 @@ impl<'m> Renderer<'_, 'm> {
             )),
             Expr::Append(left, right) => Ok(format!(
                 "{{ let mut __value = {}; __value.extend_from_slice(&{}); __value }}",
-                self.value(left)?,
-                self.value(right)?
+                self.owned_value(left)?,
+                self.read_value(right)?
             )),
-            Expr::Length(value) => Ok(format!("({}).len() as u64", self.value(value)?)),
+            Expr::Length(value) => Ok(format!("({}).len() as u64", self.read_value(value)?)),
             Expr::Index(value, offset) => Ok(format!(
                 "usize::try_from({}).ok().and_then(|__index| ({}).get(__index).cloned())",
                 self.value(offset)?,
-                self.value(value)?
+                self.read_value(value)?
             )),
             Expr::Slice(value, start, count) => Ok(format!(
                 "{{ let __start = usize::try_from({}).ok(); let __count = usize::try_from({}).ok(); match (__start, __count) {{ (Some(__start), Some(__count)) => __start.checked_add(__count).and_then(|__end| ({}).get(__start..__end).map(|__slice| __slice.to_vec())), _ => None }} }}",
                 self.value(start)?,
                 self.value(count)?,
-                self.value(value)?
+                self.read_value(value)?
             )),
-            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.value(value)?)),
+            // Encoding consumes its String. Borrowed parameters and record
+            // fields must cross the existing owned boundary first; already
+            // owned Strings retain their allocation through `into_bytes`.
+            Expr::Utf8Encode(value) => Ok(format!("({}).into_bytes()", self.owned_value(value)?)),
             Expr::Utf8Decode(value) => Ok(format!(
                 "alloc::string::String::from_utf8({}).ok()",
                 self.value(value)?
             )),
             Expr::CompareBytes(left, right) => Ok(format!(
-                "({}).cmp(&{})",
-                self.value(left)?,
-                self.value(right)?
+                "core::convert::AsRef::<[u8]>::as_ref(&({})).cmp(core::convert::AsRef::<[u8]>::as_ref(&({})))",
+                self.read_value(left)?,
+                self.read_value(right)?
             )),
             Expr::SplitExact(value, delimiter, maximum) => Ok(format!(
-                "{{ let __value = {}; let __delimiter = {}; let __maximum = usize::try_from({}).ok(); if __delimiter.is_empty() {{ None }} else {{ let __fields: alloc::vec::Vec<alloc::string::String> = __value.split(&__delimiter).map(alloc::string::String::from).collect(); __maximum.filter(|__maximum| __fields.len() <= *__maximum).map(|_| __fields) }} }}",
+                "{{ let __value = {}; let __delimiter = {}; let __limit: u32 = {}; let __maximum = usize::try_from(__limit).ok(); if __delimiter.is_empty() {{ None }} else {{ let __fields: alloc::vec::Vec<alloc::string::String> = __value.split(&__delimiter).map(alloc::string::String::from).collect(); __maximum.filter(|__maximum| __fields.len() <= *__maximum).map(|_| __fields) }} }}",
                 self.value(value)?,
                 self.value(delimiter)?,
                 self.value(maximum)?
             )),
             Expr::Join(values, delimiter) => Ok(format!(
                 "({}).join(&{})",
-                self.value(values)?,
-                self.value(delimiter)?
+                self.read_value(values)?,
+                self.read_value(delimiter)?
             )),
-            Expr::ParseDecimal(value) => Ok(format!(
-                "{{ let __text = {}; __text.parse().ok().filter(|__value| alloc::string::ToString::to_string(__value) == __text) }}",
-                self.value(value)?
-            )),
+            Expr::ParseDecimal(value) => self.parse_decimal(value, None),
+            Expr::ParseDecimalAs(target, value) => self.parse_decimal(value, Some(target)),
             Expr::FormatDecimal(value) => {
                 Ok(format!("alloc::format!(\"{{}}\", {})", self.value(value)?))
             }
@@ -1739,9 +2371,9 @@ impl<'m> Renderer<'_, 'm> {
             Expr::Negate(value) => Ok(format!("-({})", self.value(value)?)),
             Expr::Sub(a, b) => {
                 // Lean Nat subtraction truncates at zero, so it is total.
-                // See `checked_binop` for the `as u64` receiver pin.
+                // See `checked_binop` for the exact Nat receiver type.
                 Ok(format!(
-                    "(({}) as u64).saturating_sub({})",
+                    "core::convert::identity::<u64>({}).saturating_sub({})",
                     self.value(a)?,
                     self.value(b)?
                 ))
@@ -1763,7 +2395,7 @@ impl<'m> Renderer<'_, 'm> {
             // fallback for a real error — there is no `ComputeError` variant
             // for this because none is needed.
             Expr::Shr(a, b) => Ok(format!(
-                "(({}) as u64).checked_shr(u32::try_from({}).unwrap_or(u32::MAX)).unwrap_or(0)",
+                "core::convert::identity::<u64>({}).checked_shr(u32::try_from(core::convert::identity::<u64>({})).unwrap_or(u32::MAX)).unwrap_or(0)",
                 self.value(a)?,
                 self.value(b)?
             )),
@@ -1775,13 +2407,25 @@ impl<'m> Renderer<'_, 'm> {
                 self.resolved_inline(b.as_ref()),
             ) {
                 (other, Expr::String(value)) | (Expr::String(value), other) => {
-                    Ok(format!("{} == {value:?}", self.value(other)?))
+                    Ok(format!("{} == {value:?}", self.read_value(other)?))
                 }
                 (Expr::Bytes(left), Expr::Bytes(right)) => Ok(format!("{}", left == right)),
                 (other, Expr::Bytes(value)) | (Expr::Bytes(value), other) => {
-                    Ok(format!("core::convert::AsRef::<[u8]>::as_ref(&({})) == &{value:?}", self.value(other)?))
+                    Ok(format!("core::convert::AsRef::<[u8]>::as_ref(&({})) == &{value:?}", self.read_value(other)?))
                 }
-                _ => self.binop(a, b, "=="),
+                _ => {
+                    let borrowed_a = self.borrows(a);
+                    let borrowed_b = self.borrows(b);
+                    let a = self.read_value(a)?;
+                    let b = self.read_value(b)?;
+                    // Equality borrows its operands; normalize mixed owned /
+                    // borrowed values without cloning either collection.
+                    match (borrowed_a, borrowed_b) {
+                        (false, true) => Ok(format!("(&({a}) == {b})")),
+                        (true, false) => Ok(format!("({a} == &({b}))")),
+                        _ => Ok(format!("({a} == {b})")),
+                    }
+                }
             },
             Expr::Lt(a, b) => self.binop(a, b, "<"),
             Expr::Le(a, b) => self.binop(a, b, "<="),
@@ -1821,7 +2465,7 @@ impl<'m> Renderer<'_, 'm> {
                             rust_ident(last_component(&cdecl.name))
                         )
                     };
-                    if cdecl.fields.is_empty() {
+                    if cdecl.fields.is_empty() && decl.ctors.len() != 1 {
                         Ok(path)
                     } else {
                         let mut bound = Vec::with_capacity(args.len());
@@ -1854,8 +2498,8 @@ impl<'m> Renderer<'_, 'm> {
                 if self.types.contains_key(ty.as_str()) && field_type.is_none() {
                     return Err(Error::UnknownField(ty.clone(), field.clone()));
                 }
-                let projection = format!("({}).{}", self.value(e)?, rust_ident(field));
-                if field_type.is_some_and(|field_type| {
+                let projection = format!("({}).{}", self.read_value(e)?, rust_ident(field));
+                if !projection_moves(expr, &self.borrowed_locals, &self.movable_projections) && field_type.is_some_and(|field_type| {
                     !copy_type(field_type, self.types, &mut BTreeSet::new())
                 }) {
                     Ok(format!("&{projection}"))
@@ -1957,16 +2601,13 @@ impl<'m> Renderer<'_, 'm> {
         default: Option<&'m Expr>,
         mode: &Mode<'_, 'm>,
     ) -> Result<String, Error> {
-        let head_is_copy = self.list_head_is_copy(scrut);
-        let scrut_is_borrowed =
-            expression_is_borrowed(scrut, self.definitions, self.types, &self.borrowed_locals);
+        let head_rebound_by_value = self.list_head_rebound_by_value(scrut);
+        let scrut_is_borrowed = self.borrows(scrut);
         let branch_borrows = alts
             .iter()
             .map(|alt| &alt.body)
             .chain(default)
-            .map(|body| {
-                expression_is_borrowed(body, self.definitions, self.types, &self.borrowed_locals)
-            })
+            .map(|body| self.borrows(body))
             .collect::<Vec<_>>();
         let normalize_results = matches!(mode, Mode::Value)
             && branch_borrows.iter().any(|borrowed| *borrowed)
@@ -1997,7 +2638,7 @@ impl<'m> Renderer<'_, 'm> {
                 // Match ergonomics bind the head by reference; rebind it by
                 // value so arithmetic on it needs no dereference syntax.
                 ("List.nil", 0) => format!("        [] => {},\n", body),
-                ("List.cons", 2) if head_is_copy => format!(
+                ("List.cons", 2) if head_rebound_by_value => format!(
                     "        [{}, {} @ ..] => {{ let {} = {}.clone(); {} }},\n",
                     rust_local_ident(&alt.binders[0]),
                     rust_local_ident(&alt.binders[1]),
@@ -2014,21 +2655,21 @@ impl<'m> Renderer<'_, 'm> {
                 ("Bool.true", 0) => format!("        true => {},\n", body),
                 ("Bool.false", 0) => format!("        false => {},\n", body),
                 ("Option.none", 0) => format!("        None => {},\n", body),
-                ("Option.some", 1) => format!(
-                    "        Some({}) => {},\n",
-                    rust_local_ident(&alt.binders[0]),
-                    body
-                ),
-                ("Except.ok", 1) => format!(
-                    "        Ok({}) => {},\n",
-                    rust_local_ident(&alt.binders[0]),
-                    body
-                ),
-                ("Except.error", 1) => format!(
-                    "        Err({}) => {},\n",
-                    rust_local_ident(&alt.binders[0]),
-                    body
-                ),
+                ("Option.some" | "Except.ok" | "Except.error", 1) => {
+                    let constructor = match alt.ctor.as_str() {
+                        "Option.some" => "Some",
+                        "Except.ok" => "Ok",
+                        _ => "Err",
+                    };
+                    let binder = rust_local_ident(&alt.binders[0]);
+                    if self.copied_patterns.contains(&alt.binders[0]) {
+                        format!(
+                            "        {constructor}({binder}) => {{ let {binder} = *{binder}; {body} }},\n"
+                        )
+                    } else {
+                        format!("        {constructor}({binder}) => {body},\n")
+                    }
+                }
                 _ => match self.ctor_decl(&alt.ctor) {
                     Some((decl, cdecl)) if alt.binders.len() == cdecl.fields.len() => {
                         let path = if decl.ctors.len() == 1 {
@@ -2040,7 +2681,7 @@ impl<'m> Renderer<'_, 'm> {
                                 rust_ident(last_component(&cdecl.name))
                             )
                         };
-                        if cdecl.fields.is_empty() {
+                        if cdecl.fields.is_empty() && decl.ctors.len() != 1 {
                             format!("        {} => {},\n", path, body)
                         } else {
                             let mut bound = Vec::with_capacity(alt.binders.len());
@@ -2130,6 +2771,9 @@ impl<'m> Renderer<'_, 'm> {
         env: &[(&'m str, &'m Expr)],
         items: &mut Vec<String>,
     ) -> Result<(), Error> {
+        if let Expr::Let(name, value, _) = expr {
+            self.reject_eager_list_binding(name, value, env)?;
+        }
         match expr {
             Expr::Var(name) => match lookup(env, name) {
                 Some(bound) => self.static_list(bound, env, items),
@@ -2160,9 +2804,9 @@ impl<'m> Renderer<'_, 'm> {
 
     /// `checked_add`/`checked_mul`: report overflow instead of panicking.
     ///
-    /// `as u64` pins the receiver: method calls on an inferred `{integer}`
-    /// (a let-bound literal, e.g. LCNF's `let _x := 1`) fail method resolution
-    /// (E0689) — a no-op when the receiver is already `u64`.
+    /// Exact Nat typing propagates to let-bound literals. A cast leaves their
+    /// original type unconstrained (default i32), rejecting large valid Nats;
+    /// identity also refuses narrowing from an incompatible operand type.
     fn checked_binop(
         &self,
         a: &'m Expr,
@@ -2171,7 +2815,7 @@ impl<'m> Renderer<'_, 'm> {
         error: &str,
     ) -> Result<String, Error> {
         Ok(format!(
-            "(({}) as u64).{}({}).ok_or(crate::ComputeError::{})?",
+            "core::convert::identity::<u64>({}).{}({}).ok_or(crate::ComputeError::{})?",
             self.value(a)?,
             method,
             self.value(b)?,
@@ -2190,7 +2834,7 @@ impl<'m> Renderer<'_, 'm> {
         overflow_error: &str,
     ) -> Result<String, Error> {
         Ok(format!(
-            "(({}) as u64).{}(u32::try_from({}).map_err(|_| crate::ComputeError::{})?).ok_or(crate::ComputeError::{})?",
+            "core::convert::identity::<u64>({}).{}(u32::try_from(core::convert::identity::<u64>({})).map_err(|_| crate::ComputeError::{})?).ok_or(crate::ComputeError::{})?",
             self.value(a)?,
             method,
             self.value(b)?,
@@ -2199,12 +2843,14 @@ impl<'m> Renderer<'_, 'm> {
         ))
     }
 
-    /// Lean Nat division and modulo are total: `x / 0 = x % 0 = 0`.
+    /// Lean Nat's total operations satisfy `x / 0 = 0` and `x % 0 = x`.
+    /// Tuple evaluation is once, left-to-right; match bindings are not in
+    /// scope in either operand, even when an operand uses the same name.
     fn total_binop(&self, a: &'m Expr, b: &'m Expr, op: &str) -> Result<String, Error> {
         let (a, b) = (self.value(a)?, self.value(b)?);
+        let zero = if op == "%" { "__left" } else { "0" };
         Ok(format!(
-            "if ({}) == 0 {{ 0 }} else {{ ({}) {} ({}) }}",
-            b, a, op, b
+            "match (core::convert::identity::<u64>({a}), core::convert::identity::<u64>({b})) {{ (__left, 0) => {zero}, (__left, __right) => __left {op} __right }}"
         ))
     }
 }

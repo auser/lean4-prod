@@ -210,8 +210,10 @@ What that means in practice, and what you must not regress:
 Known remaining limitations: typed Lean `Int` semantics is NOT implemented
 (generated Nat is u64 with the bounded policy: checked add/mul/shl/pow,
 saturating sub, total div/mod-by-zero). Arbitrary-precision Nat is ruled OUT by
-the no-heap directive, not merely unimplemented. Closures (`Code.fun`) still
-lower to opaque. User-defined inductives now generate real Rust structs/enums,
+the no-heap directive, not merely unimplemented. Saturated, non-escaping,
+acyclic first-order local functions with runtime-valued arguments lower to expression-valued continuation
+IR; bounded expansion preserves captures and non-tail caller continuations.
+General runtime closure values remain unsupported. User-defined inductives now generate real Rust structs/enums,
 and `ctor`/`proj` on them resolve against the module's own `(type ...)`
 declarations — a CONSTRUCTION whose constructor has no declaration in the
 module is rejected (`UnresolvedCall`) rather than rendered as a dotted Lean
@@ -280,7 +282,9 @@ Lowerer requirements:
   `Error::UnresolvedCall`. It is still counted in coverage, but it is a hard
   build failure, not a rendered call.)*
 - `cases`→`cases` node, `proj`→`proj`, `jp/jmp`→`jp`/`jmp`, `return x`→value,
-  `unreach`→`unreachable`, `fun`(lambda)→`opaque` + coverage note (closures are phase-2).
+  `unreach`→`unreachable`. Validated first-order `fun`/local calls use
+  expression-valued IR `jp`/`jmp`, not a Lean tail-jump rewrite. Reject escaping,
+  partial, overapplied or cyclic functions; preserve eager argument evaluation.
 - Type lowering: `Nat/Bool/Int`→same, `UorAtlas.Instance`→`Instance`, else opaque-type
   form per parser.
   *(HISTORICAL — what M3 built. Superseded in S0/S1: the `UorAtlas.Instance`
