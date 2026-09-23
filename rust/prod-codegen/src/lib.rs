@@ -625,22 +625,68 @@ fn count_var_uses(expr: &Expr, name: &str) -> usize {
 
 /// Alternatives are exclusive: a binder used once in either branch can still
 /// transfer its owner without a clone. Sequential uses remain additive.
-fn count_path_uses(expr: &Expr, name: &str) -> usize {
+fn count_path_uses(mut expr: &Expr, name: &str) -> usize {
+    // Only leading reads are safe to ignore: a length read after a transfer
+    // still requires the original owner. Scalar results retain no reference.
+    // Do not apply this prefix rule recursively after a possible transfer.
+    while let Expr::Let(_, value, body) = expr {
+        let scalar_read = matches!(value.as_ref(), Expr::Length(input) | Expr::StringLength(input)
+            if matches!(input.as_ref(), Expr::Var(candidate) if candidate == name));
+        if scalar_read || count_var_uses(value, name) == 0 {
+            expr = body;
+        } else {
+            break;
+        }
+    }
     match expr {
+        // An owner-free selector cannot transfer or retain this binding.
+        // Each exclusive branch therefore begins with the same unmoved owner;
+        // only its own leading scalar reads may be ignored. An owner-bearing
+        // selector, retained value, or later sequential use stays conservative.
+        Expr::If(condition, yes, no) if count_var_uses(condition, name) == 0 => {
+            count_path_uses(yes, name).max(count_path_uses(no, name))
+        }
+        Expr::Match {
+            scrut,
+            alts,
+            default,
+        } if count_var_uses(scrut, name) == 0 => alts
+            .iter()
+            .map(|alt| count_path_uses(&alt.body, name))
+            .chain(default.iter().map(|value| count_path_uses(value, name)))
+            .max()
+            .unwrap_or(0),
+        _ => count_sequential_path_uses(expr, name),
+    }
+}
+
+fn count_sequential_path_uses(expr: &Expr, name: &str) -> usize {
+    match expr {
+        // Rendering self append consumes one owner and extends its own range.
+        Expr::Append(left, right)
+            if matches!((left.as_ref(), right.as_ref()),
+            (Expr::Var(a), Expr::Var(b)) if a == name && a == b) =>
+        {
+            1
+        }
         Expr::If(condition, yes, no) => {
-            count_path_uses(condition, name)
-                + count_path_uses(yes, name).max(count_path_uses(no, name))
+            count_sequential_path_uses(condition, name)
+                + count_sequential_path_uses(yes, name).max(count_sequential_path_uses(no, name))
         }
         Expr::Match {
             scrut,
             alts,
             default,
         } => {
-            count_path_uses(scrut, name)
+            count_sequential_path_uses(scrut, name)
                 + alts
                     .iter()
-                    .map(|alt| count_path_uses(&alt.body, name))
-                    .chain(default.iter().map(|value| count_path_uses(value, name)))
+                    .map(|alt| count_sequential_path_uses(&alt.body, name))
+                    .chain(
+                        default
+                            .iter()
+                            .map(|value| count_sequential_path_uses(value, name)),
+                    )
                     .max()
                     .unwrap_or(0)
         }
@@ -648,7 +694,7 @@ fn count_path_uses(expr: &Expr, name: &str) -> usize {
             usize::from(matches!(expr, Expr::Var(candidate) if candidate == name))
                 + expr
                     .children()
-                    .map(|child| count_path_uses(child, name))
+                    .map(|child| count_sequential_path_uses(child, name))
                     .sum::<usize>()
         }
     }
@@ -2398,6 +2444,11 @@ impl<'m> Renderer<'_, 'm> {
             Expr::CheckedConvert(value) => Ok(format!(
                 "core::convert::TryFrom::try_from({}).ok()",
                 self.value(value)?
+            )),
+            Expr::Append(left, right) if matches!((left.as_ref(), right.as_ref()),
+                (Expr::Var(a), Expr::Var(b)) if a == b) => Ok(format!(
+                "{{ let mut __value = {}; __value.extend_from_within(..); __value }}",
+                self.owned_value(left)?
             )),
             Expr::Append(left, right) => Ok(format!(
                 "{{ let mut __value = {}; __value.extend_from_slice(&{}); __value }}",
