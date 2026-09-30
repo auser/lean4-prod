@@ -992,6 +992,25 @@ fn inline_bindings(expr: &Expr) -> BTreeMap<String, &Expr> {
     output
 }
 
+/// A byte view may replace an encoding allocation only when every use is a
+/// direct, non-owning length/ordering read. Aliases, returns, calls, raw
+/// parameters and join points retain ordinary owned encoding. Local names
+/// have already been lexically normalized before rendering.
+fn utf8_read_only_uses(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Var(candidate) => candidate != name,
+        Expr::Param(_) | Expr::Jp { .. } | Expr::Jmp(..) => false,
+        Expr::Length(value) if matches!(value.as_ref(), Expr::Var(value) if value == name) => true,
+        Expr::CompareBytes(left, right) => [left, right].iter().all(|value| {
+            matches!(value.as_ref(), Expr::Var(value) if value == name)
+                || utf8_read_only_uses(value, name)
+        }),
+        _ => expr
+            .children()
+            .all(|child| utf8_read_only_uses(child, name)),
+    }
+}
+
 /// Owners used exclusively through distinct field projections can be partially
 /// moved. Names must already be lexically normalized. Any whole-owner use,
 /// repeated field, or join point retains the conservative borrowing policy.
@@ -1973,6 +1992,23 @@ impl<'m> Renderer<'_, 'm> {
         }
     }
 
+    fn utf8_read_binding(&self, name: &str, value: &'m Expr, body: &Expr) -> Option<String> {
+        let Expr::Utf8Encode(text) = value else {
+            return None;
+        };
+        if count_var_uses(body, name) == 0 || !utf8_read_only_uses(body, name) {
+            return None;
+        }
+        // Borrow only a stable local or a static literal. Temporaries and
+        // projections retain their original evaluation/lifetime behavior.
+        let text = match self.resolved_inline(text) {
+            Expr::Var(name) => rust_local_ident(name),
+            Expr::String(value) => format!("{value:?}"),
+            _ => return None,
+        };
+        Some(format!("({text}).as_bytes()"))
+    }
+
     fn owned_value(&self, expr: &'m Expr) -> Result<String, Error> {
         self.render(expr, &Mode::OwnedValue)
     }
@@ -2335,28 +2371,38 @@ impl<'m> Renderer<'_, 'm> {
             {
                 self.render(body, mode)
             }
-            Expr::Let(name, val, body) => match mode {
-                Mode::Builder { out, env, depth } if self.is_list_valued(val, env) => {
-                    // A list binding has no runtime representation to emit;
-                    // record it and resolve uses through the environment.
-                    let mut extended = env.to_vec();
-                    extended.push((name.as_str(), val));
-                    self.render(
-                        body,
-                        &Mode::Builder {
-                            out,
-                            env: &extended,
-                            depth: *depth,
-                        },
-                    )
+            Expr::Let(name, val, body) => {
+                if let Some(encoded) = self.utf8_read_binding(name, val, body) {
+                    return Ok(format!(
+                        "{{ let {} = {}; {} }}",
+                        rust_local_ident(name),
+                        encoded,
+                        self.render(body, mode)?
+                    ));
                 }
-                _ => Ok(format!(
-                    "{{ let {} = {}; {} }}",
-                    rust_local_ident(name),
-                    self.value(val)?,
-                    self.render(body, mode)?
-                )),
-            },
+                match mode {
+                    Mode::Builder { out, env, depth } if self.is_list_valued(val, env) => {
+                        // A list binding has no runtime representation to emit;
+                        // record it and resolve uses through the environment.
+                        let mut extended = env.to_vec();
+                        extended.push((name.as_str(), val));
+                        self.render(
+                            body,
+                            &Mode::Builder {
+                                out,
+                                env: &extended,
+                                depth: *depth,
+                            },
+                        )
+                    }
+                    _ => Ok(format!(
+                        "{{ let {} = {}; {} }}",
+                        rust_local_ident(name),
+                        self.value(val)?,
+                        self.render(body, mode)?
+                    )),
+                }
+            }
             Expr::Match {
                 scrut,
                 alts,
