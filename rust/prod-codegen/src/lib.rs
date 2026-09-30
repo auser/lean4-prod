@@ -2926,18 +2926,20 @@ impl<'m> Renderer<'_, 'm> {
             && branch_borrows.iter().any(|borrowed| *borrowed)
             && branch_borrows.iter().any(|borrowed| !borrowed);
         let scrut = self.value(scrut)?;
-        // A projected list can be a Vec or a borrowed Vec, whereas a list
-        // parameter is already a slice. Match all representations through a
-        // borrowed full slice without moving or cloning the owner.
-        let match_scrut = if alts
+        // List parameters are slices, but record fields, local aliases and
+        // temporaries may be Vecs. Normalize the match place, not its owner:
+        // evaluate once and borrow the full slice without cloning its payload.
+        // Match-temporary lifetime extension keeps owned temporaries alive for
+        // the arms; existing result ownership handles values escaping them.
+        let scrut = if alts
             .iter()
             .any(|alt| matches!(alt.ctor.as_str(), "List.nil" | "List.cons"))
         {
-            format!("&({})[..]", scrut)
+            format!("&({scrut})[..]")
         } else {
-            scrut.clone()
+            scrut
         };
-        let mut out = format!("match {} {{\n", match_scrut);
+        let mut out = format!("match {} {{\n", scrut);
         for alt in alts {
             let body = if let Some(plan) = tail {
                 self.render_tail(&alt.body, plan)?
