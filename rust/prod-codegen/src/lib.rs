@@ -2596,6 +2596,20 @@ impl<'m> Renderer<'_, 'm> {
                 "{{ let mut __value = {}; __value.extend_from_within(..); __value }}",
                 self.owned_value(left)?
             )),
+            Expr::Append(left, right)
+                if matches!(self.resolved_inline(right), Expr::Var(name)
+                    if !self.borrowed_locals.contains(name) && !self.clone_locals.contains(name)) =>
+            {
+                // A single-use owned RHS can transfer its elements. Borrowing
+                // it for extend_from_slice needlessly clones nested payloads.
+                // Evaluate both operands left-to-right outside the temporary's
+                // scope; shared locals and borrowed slices retain the path below.
+                Ok(format!(
+                    "{{ let mut __append = ({}, {}); __append.0.extend(__append.1); __append.0 }}",
+                    self.owned_value(left)?,
+                    self.value(right)?
+                ))
+            }
             Expr::Append(left, right) => Ok(format!(
                 "{{ let mut __value = {}; __value.extend_from_slice(&{}); __value }}",
                 self.owned_value(left)?,

@@ -1,5 +1,8 @@
 //! Raw-IR API regression; source/kernel execution is a separate fixture gate.
-use prod_codegen::{generate_cargo_package, generate_module, CargoPackageSpec};
+use prod_codegen::{
+    generate_cargo_package, generate_core_wasm_package, generate_module, CargoPackageSpec,
+    CoreWasmSpec,
+};
 use prod_ir::parser::parse_module;
 use sha2::{Digest, Sha256};
 use std::{path::PathBuf, process::Command};
@@ -40,6 +43,44 @@ const IR: &str = r#"(module OwnedAccumulator
   (def changed_borrow ((input (named "Row")) (items (List (named "Row"))) (fuel Nat)) (named "Rows")
     (if (eq fuel 0) (ctor "Rows.mk" items)
       (call changed_borrow (ctor "Row.mk" (bytes 9)) (append items (ctor "List.nil")) (sub fuel 1))))
+  (def append_owned ((input (Option (named "Pair")))) (Option (named "Rows"))
+    (cases input
+      (alt "Option.none" () (ctor "Option.none"))
+      (alt "Option.some" (pair)
+        (let left (proj "Pair" "left" pair)
+          (let right (proj "Pair" "right" pair)
+            (ctor "Option.some" (ctor "Rows.mk" (append left right))))))))
+  (def append_borrowed ((pair (named "Pair"))) (named "Rows")
+    (let right (proj "Pair" "right" pair)
+      (ctor "Rows.mk" (append (proj "Pair" "left" pair) right))))
+  (def append_retained ((input (Option (named "Pair")))) (Option (named "Pair"))
+    (cases input
+      (alt "Option.none" () (ctor "Option.none"))
+      (alt "Option.some" (pair)
+        (let left (proj "Pair" "left" pair)
+          (let right (proj "Pair" "right" pair)
+            (ctor "Option.some" (ctor "Pair.mk" (append left right) right)))))))
+  (def append_branch ((input (Option (named "Pair"))) (choose Bool)) (Option (named "Rows"))
+    (cases input
+      (alt "Option.none" () (ctor "Option.none"))
+      (alt "Option.some" (pair)
+        (let left (proj "Pair" "left" pair)
+          (let right (proj "Pair" "right" pair)
+            (ctor "Option.some" (ctor "Rows.mk"
+              (if choose (append left right) (append right left)))))))))
+  (def append_shadow ((input (Option (named "Pair")))) (Option (named "Rows"))
+    (cases input
+      (alt "Option.none" () (ctor "Option.none"))
+      (alt "Option.some" (pair)
+        (let __append (proj "Pair" "left" pair)
+          (let pair (proj "Pair" "right" pair)
+            (ctor "Option.some" (ctor "Rows.mk" (append __append pair))))))))
+  (def append_entry ((input Bytes)) Bytes
+    (let suffix (ctor "List.cons" (ctor "Row.mk" input) (ctor "List.nil"))
+      (let rows (append (ctor "List.nil") suffix)
+        (cases (index rows 0)
+          (alt "Option.none" () (bytes 255))
+          (alt "Option.some" (head) (proj "Row" "bytes" head))))))
 )"#;
 
 #[test]
@@ -112,6 +153,38 @@ const RUNNER: &str = r#"
 use owned_accumulator_fixture::*;
 fn main() {
     assert_eq!(__prod_owned_7_collect(), 17);
+    for size in [1, 128, 4096, 1048576] {
+        for append in [append_owned, append_shadow] {
+            let left = vec![7; size]; let left_pointer = left.as_ptr();
+            let right = vec![9; size]; let right_pointer = right.as_ptr();
+            let actual = append(Some(Pair {left: vec![Row {bytes: left}], right: vec![Row {bytes: right}]})).unwrap();
+            assert_eq!(actual.items[0].bytes.as_ptr(), left_pointer);
+            assert_eq!(actual.items[1].bytes.as_ptr(), right_pointer, "a single-use owned append RHS must move nested payloads");
+            assert_eq!(actual.items[0].bytes, vec![7; size]);
+            assert_eq!(actual.items[1].bytes, vec![9; size]);
+        }
+        for choose in [false, true] {
+            let left = vec![7; size]; let left_pointer = left.as_ptr();
+            let right = vec![9; size]; let right_pointer = right.as_ptr();
+            let actual = append_branch(Some(Pair {left: vec![Row {bytes: left}], right: vec![Row {bytes: right}]}), choose).unwrap();
+            assert_eq!(actual.items[usize::from(!choose)].bytes.as_ptr(), left_pointer);
+            assert_eq!(actual.items[usize::from(choose)].bytes.as_ptr(), right_pointer);
+        }
+        let original = Pair {left: vec![Row {bytes: vec![7; size]}], right: vec![Row {bytes: vec![9; size]}]};
+        let mut result = append_borrowed(&original);
+        assert_ne!(result.items[1].bytes.as_ptr(), original.right[0].bytes.as_ptr());
+        result.items[1].bytes[0] = 3;
+        assert_eq!(original.right[0].bytes, vec![9; size]);
+        let mut result = append_retained(Some(original)).unwrap();
+        assert_ne!(result.left[1].bytes.as_ptr(), result.right[0].bytes.as_ptr());
+        result.left[1].bytes[0] = 4;
+        assert_eq!(result.right[0].bytes, vec![9; size]);
+        assert_eq!(append_entry(vec![17; size]), vec![17; size]);
+    }
+    assert_eq!(append_owned(None), None);
+    assert_eq!(append_retained(None), None);
+    assert_eq!(append_shadow(None), None);
+    for choose in [false, true] { assert_eq!(append_branch(None, choose), None); }
     std::thread::Builder::new().stack_size(65536).spawn(|| {
         for fuel in [0, 1, 2, 255, 256, 65536] {
             let seed = vec![7; 4096]; let pointer = seed.as_ptr();
@@ -256,5 +329,54 @@ fn native_owners_branches_aliases_errors_and_small_stack() {
             );
             assert_eq!(succeeds(&mut Command::new(&executable)), "owned accumulator: ownership, alias, branch, eager errors and 64KiB stack passed\n");
         }
+    }
+}
+
+#[test]
+fn owned_append_executes_in_import_free_debug_and_release_wasm() {
+    let (remaining, module) = parse_module(IR).unwrap();
+    assert!(remaining.is_empty());
+    let spec = CoreWasmSpec {
+        crate_name: "owned-append-guest".into(),
+        entry: "append_entry".into(),
+        export_name: "holo_run".into(),
+        input_allocation_cap: 1048576,
+        output_allocation_cap: 1048576,
+        maximum_pages: 256,
+        input_ir_sha256: format!("{:x}", Sha256::digest(IR.as_bytes())),
+    };
+    let package = generate_core_wasm_package(&module, &spec).unwrap();
+    assert_eq!(package, generate_core_wasm_package(&module, &spec).unwrap());
+    let scratch = Scratch::new();
+    for file in package.files {
+        let path = scratch.0.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, file.bytes).unwrap();
+    }
+    for release in [false, true] {
+        let mut compiler = Command::new("cargo");
+        compiler.arg("build");
+        if release {
+            compiler.arg("--release");
+        }
+        succeeds(
+            compiler
+                .current_dir(&scratch.0)
+                .args(["--locked", "--offline"])
+                .env_remove("RUSTC_WRAPPER")
+                .env("CARGO_TARGET_DIR", scratch.0.join("target")),
+        );
+        let result = succeeds(
+            Command::new("node")
+                .arg(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/owned_append_wasm_test.mjs"),
+                )
+                .arg(scratch.0.join(format!(
+                    "target/wasm32-unknown-unknown/{}/owned_append_guest.wasm",
+                    if release { "release" } else { "debug" }
+                ))),
+        );
+        assert!(result.contains("\"cases\":16"), "{result}");
     }
 }
